@@ -181,7 +181,7 @@ static const char CLI_ACTIVATION_REFUSED_MESSAGE[] =
     "error: this is NOT a running-session problem — the reservation itself "
     "failed (coordination lock, leftover state, or permissions). Nothing needs "
     "to be closed. Check the errors above, and report this with the output of "
-    "'ls -la \"${CBM_CACHE_DIR:-$HOME/.cache/codebase-memory-mcp}\"' if it "
+    "'ls -la \"${CBM_CACHE_DIR:-$HOME/.cache/codegraph-light}\"' if it "
     "persists.";
 static const char CLI_ACTIVATION_PARTIAL_MESSAGE[] =
     "error: activation stopped after one or more agent configuration or "
@@ -7431,7 +7431,7 @@ static const config_key_def_t CONFIG_KEYS[] = {
 };
 
 /* #1558: ui_enabled and ui_port were reachable ONLY by hand-editing
- * ~/.cache/codebase-memory-mcp/config.json. They were absent from CONFIG_KEYS,
+ * ~/.cache/codegraph-light/config.json. They were absent from CONFIG_KEYS,
  * so `config list` could not show them and `config set` rejected them — while
  * ui_enabled governs a loopback HTTP listener. A user who wants that surface
  * off should not have to read our source to find the switch, and a reporter

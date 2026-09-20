@@ -156,4 +156,4 @@ else
         CFLAGS_EXTRA="$CFLAGS_EXTRA" "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"
 fi
 
-echo "=== Build complete: ${BUILD_DIR}/codebase-memory-mcp ==="
+echo "=== Build complete: ${BUILD_DIR}/codegraph-light ==="

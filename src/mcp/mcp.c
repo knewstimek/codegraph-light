@@ -22,10 +22,10 @@ enum {
     MCP_DB_EXT = 3,      /* strlen(".db") */
     MCP_MIN_DB_NAME = 4, /* min length for "x.db" */
     MCP_SEPARATOR = 2,   /* space for separator chars */
-    MCP_DEFAULT_DEPTH = 3,
+    MCP_DEFAULT_DEPTH = 2,
     MCP_DEFAULT_BFS_DEPTH = 2,
     MCP_DEFAULT_LIMIT = 10,
-    MCP_BFS_LIMIT = 100,            /* default per-direction trace budget (limit param raises) */
+    MCP_BFS_LIMIT = 50,             /* default per-direction trace budget (limit param raises) */
     MCP_BFS_LIMIT_MAX = 5000,       /* hard ceiling for the limit param (context-bomb guard) */
     MCP_DEFAULT_IMPACT_LIMIT = 200, /* detect_changes per-symbol rows; rollup stays complete */
     MCP_SNIPPET_MAX_LINES = 500,    /* get_code_snippet line cap (whole-file Module guard) */
@@ -799,6 +799,92 @@ static const tool_annotation_def_t *mcp_tool_annotations(const char *name) {
     return NULL;
 }
 
+/* CodeGraph Light keeps the upstream handlers and their full internal schemas,
+ * but advertises a deliberately small, stable MCP surface.  Keeping this
+ * translation at the registry boundary makes upstream graph-engine syncs much
+ * less invasive and prevents implementation-only options from consuming every
+ * agent session's context window. */
+static const char *mcp_light_tool_name(const char *name) {
+    if (strcmp(name, "index_repository") == 0) return "index";
+    if (strcmp(name, "search_graph") == 0) return "search";
+    if (strcmp(name, "trace_path") == 0) return "trace";
+    if (strcmp(name, "get_code_snippet") == 0) return "source";
+    if (strcmp(name, "get_architecture") == 0) return "overview";
+    if (strcmp(name, "get_graph_schema") == 0) return "schema";
+    if (strcmp(name, "query_graph") == 0) return "query";
+    return NULL;
+}
+
+static const char *mcp_upstream_tool_name(const char *name) {
+    if (!name) return NULL;
+    if (strcmp(name, "index") == 0) return "index_repository";
+    if (strcmp(name, "search") == 0) return "search_graph";
+    if (strcmp(name, "trace") == 0) return "trace_path";
+    if (strcmp(name, "source") == 0) return "get_code_snippet";
+    if (strcmp(name, "overview") == 0) return "get_architecture";
+    if (strcmp(name, "schema") == 0) return "get_graph_schema";
+    if (strcmp(name, "query") == 0) return "query_graph";
+    return name;
+}
+
+static const char *mcp_light_tool_description(const char *name) {
+    if (strcmp(name, "index_repository") == 0) return "Build or refresh a repository graph.";
+    if (strcmp(name, "search_graph") == 0) return "Find code symbols by name, kind, or path.";
+    if (strcmp(name, "trace_path") == 0) return "Find callers, callees, and call paths.";
+    if (strcmp(name, "get_code_snippet") == 0) return "Return source code for a graph symbol.";
+    if (strcmp(name, "get_architecture") == 0) return "Summarize repository structure and hotspots.";
+    if (strcmp(name, "get_graph_schema") == 0) return "Describe graph nodes, properties, and relationships.";
+    if (strcmp(name, "query_graph") == 0) return "Run a bounded, read-only graph query.";
+    return NULL;
+}
+
+static const char *mcp_light_tool_schema(const char *name) {
+    if (strcmp(name, "index_repository") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"repo_path\":{\"type\":\"string\"}},"
+               "\"required\":[\"repo_path\"],\"additionalProperties\":false}";
+    }
+    if (strcmp(name, "search_graph") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+               "\"query\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},"
+               "\"file_pattern\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\","
+               "\"minimum\":1,\"maximum\":50,\"default\":10}},\"required\":[\"project\"],"
+               "\"additionalProperties\":false}";
+    }
+    if (strcmp(name, "trace_path") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+               "\"function_name\":{\"type\":\"string\"},\"direction\":{\"type\":\"string\","
+               "\"enum\":[\"inbound\",\"outbound\",\"both\"],\"default\":\"both\"},"
+               "\"depth\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5,\"default\":2},"
+               "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,"
+               "\"default\":50}},\"required\":[\"project\",\"function_name\"],"
+               "\"additionalProperties\":false}";
+    }
+    if (strcmp(name, "get_code_snippet") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+               "\"qualified_name\":{\"type\":\"string\"},\"max_lines\":{\"type\":\"integer\","
+               "\"minimum\":1,\"maximum\":500,\"default\":120}},"
+               "\"required\":[\"project\",\"qualified_name\"],\"additionalProperties\":false}";
+    }
+    if (strcmp(name, "get_architecture") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+               "\"path\":{\"type\":\"string\"}},\"required\":[\"project\"],"
+               "\"additionalProperties\":false}";
+    }
+    if (strcmp(name, "get_graph_schema") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+               "\"diagnostics\":{\"type\":\"string\",\"enum\":[\"none\",\"full\"],"
+               "\"default\":\"none\"}},\"required\":[\"project\"],"
+               "\"additionalProperties\":false}";
+    }
+    if (strcmp(name, "query_graph") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+               "\"query\":{\"type\":\"string\"},\"max_rows\":{\"type\":\"integer\","
+               "\"minimum\":1,\"maximum\":500,\"default\":50},\"cursor\":{\"type\":\"string\"}},"
+               "\"required\":[\"project\",\"query\"],\"additionalProperties\":false}";
+    }
+    return NULL;
+}
+
 static void mcp_add_json_schema(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
                                 const char *schema_json) {
     yyjson_doc *schema_doc = yyjson_read(schema_json, strlen(schema_json), 0);
@@ -813,13 +899,13 @@ static void mcp_add_json_schema(yyjson_mut_doc *doc, yyjson_mut_val *obj, const 
 
 static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) {
     yyjson_mut_val *tool = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, tool, "name", TOOLS[i].name);
+    yyjson_mut_obj_add_str(doc, tool, "name", mcp_light_tool_name(TOOLS[i].name));
     /* MCP title is optional and clients fall back to name. These titles only
      * repeated the snake_case name with spaces, so omit their recurring
      * discovery cost and retain the behavioral description instead. */
-    yyjson_mut_obj_add_str(doc, tool, "description", TOOLS[i].description);
+    yyjson_mut_obj_add_str(doc, tool, "description", mcp_light_tool_description(TOOLS[i].name));
 
-    mcp_add_json_schema(doc, tool, "inputSchema", TOOLS[i].input_schema);
+    mcp_add_json_schema(doc, tool, "inputSchema", mcp_light_tool_schema(TOOLS[i].name));
     /* Deliberately NO outputSchema. Tool output is format-parameter-polymorphic
      * (tree text by default, a JSON object under format:"json"), so no static
      * schema is truthful — and a declared schema makes spec-honoring clients
@@ -841,20 +927,18 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
 
 static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",      "trace_path",     "get_code_snippet",
-        "get_file_outline", "get_graph_schema", "compare_graphs", "get_architecture",
-        "search_code",      "list_projects",    "index_status",   "check_index_coverage",
-        "detect_changes",
+        "search_graph", "query_graph", "trace_path", "get_code_snippet",
+        "get_graph_schema", "get_architecture",
     };
-    static const char *const scout_tools[] = {
-        "search_graph",     "trace_path",    "get_code_snippet", "get_file_outline",
-        "get_architecture", "list_projects", "index_status",     "check_index_coverage",
+    static const char *const minimal_tools[] = {
+        "index_repository", "search_graph", "trace_path", "get_code_snippet",
     };
     if (!name) {
         return false;
     }
+    name = mcp_upstream_tool_name(name);
     if (profile == CBM_MCP_TOOL_PROFILE_ALL) {
-        return true;
+        return mcp_light_tool_name(name) != NULL;
     }
     const char *const *allowed = NULL;
     size_t allowed_count = 0U;
@@ -862,8 +946,8 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
         allowed = analysis_tools;
         allowed_count = sizeof(analysis_tools) / sizeof(analysis_tools[0]);
     } else if (profile == CBM_MCP_TOOL_PROFILE_SCOUT) {
-        allowed = scout_tools;
-        allowed_count = sizeof(scout_tools) / sizeof(scout_tools[0]);
+        allowed = minimal_tools;
+        allowed_count = sizeof(minimal_tools) / sizeof(minimal_tools[0]);
     }
     for (size_t i = 0U; i < allowed_count; i++) {
         if (strcmp(name, allowed[i]) == 0) {
@@ -874,7 +958,8 @@ static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
 }
 
 static const char *mcp_tool_profile_name(cbm_mcp_tool_profile_t profile) {
-    return profile == CBM_MCP_TOOL_PROFILE_SCOUT ? "scout" : "analysis";
+    if (profile == CBM_MCP_TOOL_PROFILE_ALL) return "default";
+    return profile == CBM_MCP_TOOL_PROFILE_SCOUT ? "minimal" : "analysis";
 }
 
 int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
@@ -892,8 +977,13 @@ int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
             *profile_out = CBM_MCP_TOOL_PROFILE_ANALYSIS;
             continue;
         }
-        if (strcmp(arg, "--tool-profile=scout") == 0) {
+        if (strcmp(arg, "--tool-profile=minimal") == 0 ||
+            strcmp(arg, "--tool-profile=scout") == 0) {
             *profile_out = CBM_MCP_TOOL_PROFILE_SCOUT;
+            continue;
+        }
+        if (strcmp(arg, "--tool-profile=default") == 0) {
+            *profile_out = CBM_MCP_TOOL_PROFILE_ALL;
             continue;
         }
         if (strcmp(arg, "--tool-profile") == 0) {
@@ -902,8 +992,11 @@ int cbm_mcp_parse_tool_profile_args(int argc, const char *const argv[const],
             }
             if (strcmp(argv[i + 1], "analysis") == 0) {
                 *profile_out = CBM_MCP_TOOL_PROFILE_ANALYSIS;
-            } else if (strcmp(argv[i + 1], "scout") == 0) {
+            } else if (strcmp(argv[i + 1], "minimal") == 0 ||
+                       strcmp(argv[i + 1], "scout") == 0) {
                 *profile_out = CBM_MCP_TOOL_PROFILE_SCOUT;
+            } else if (strcmp(argv[i + 1], "default") == 0) {
+                *profile_out = CBM_MCP_TOOL_PROFILE_ALL;
             } else {
                 return -1;
             }
@@ -990,22 +1083,33 @@ const char *cbm_mcp_tool_input_schema(const char *tool_name) {
         return NULL;
     }
     for (int i = 0; i < TOOL_COUNT; i++) {
-        if (strcmp(TOOLS[i].name, tool_name) == 0) {
-            return TOOLS[i].input_schema;
+        const char *public_name = mcp_light_tool_name(TOOLS[i].name);
+        if (public_name && strcmp(public_name, tool_name) == 0) {
+            return mcp_light_tool_schema(TOOLS[i].name);
         }
     }
     return NULL;
 }
 
 int cbm_mcp_tool_count(void) {
-    return TOOL_COUNT;
+    return mcp_allowed_tool_count(CBM_MCP_TOOL_PROFILE_ALL);
 }
 
 const char *cbm_mcp_tool_name(int index) {
-    if (index < 0 || index >= TOOL_COUNT) {
+    if (index < 0) {
         return NULL;
     }
-    return TOOLS[index].name;
+    int public_index = 0;
+    for (int i = 0; i < TOOL_COUNT; i++) {
+        const char *name = mcp_light_tool_name(TOOLS[i].name);
+        if (!name) {
+            continue;
+        }
+        if (public_index++ == index) {
+            return name;
+        }
+    }
+    return NULL;
 }
 
 const char *cbm_mcp_tool_description(const char *tool_name) {
@@ -1013,8 +1117,9 @@ const char *cbm_mcp_tool_description(const char *tool_name) {
         return NULL;
     }
     for (int i = 0; i < TOOL_COUNT; i++) {
-        if (strcmp(TOOLS[i].name, tool_name) == 0) {
-            return TOOLS[i].description;
+        const char *public_name = mcp_light_tool_name(TOOLS[i].name);
+        if (public_name && strcmp(public_name, tool_name) == 0) {
+            return mcp_light_tool_description(TOOLS[i].name);
         }
     }
     return NULL;
@@ -1051,9 +1156,10 @@ static size_t help_append(char *out, size_t cap, size_t len, const char *fmt, ..
 }
 
 char *cbm_mcp_tools_help_list(void) {
+    int public_count = cbm_mcp_tool_count();
     size_t cap = SLEN("Tools:") + 2; /* trailing newline + NUL */
-    for (int i = 0; i < TOOL_COUNT; i++) {
-        cap += strlen(TOOLS[i].name) + SLEN(" ,\n "); /* per-tool worst case incl. a wrap */
+    for (int i = 0; i < public_count; i++) {
+        cap += strlen(cbm_mcp_tool_name(i)) + SLEN(" ,\n ");
     }
     char *out = malloc(cap);
     if (!out) {
@@ -1061,14 +1167,15 @@ char *cbm_mcp_tools_help_list(void) {
     }
     size_t len = help_append(out, cap, 0, "Tools:");
     size_t col = len;
-    for (int i = 0; i < TOOL_COUNT; i++) {
-        const char *sep = (i + 1 < TOOL_COUNT) ? "," : "";
-        size_t item = SLEN(" ") + strlen(TOOLS[i].name) + strlen(sep);
+    for (int i = 0; i < public_count; i++) {
+        const char *name = cbm_mcp_tool_name(i);
+        const char *sep = (i + 1 < public_count) ? "," : "";
+        size_t item = SLEN(" ") + strlen(name) + strlen(sep);
         if (i > 0 && col + item > MCP_HELP_TOOLS_WRAP_COL) {
             len += help_append(out, cap, len, "\n ");
             col = 1;
         }
-        size_t wrote = help_append(out, cap, len, " %s%s", TOOLS[i].name, sep);
+        size_t wrote = help_append(out, cap, len, " %s%s", name, sep);
         len += wrote;
         col += wrote;
     }
@@ -1314,19 +1421,14 @@ static const int SUPPORTED_VERSION_COUNT =
     (int)(sizeof(SUPPORTED_PROTOCOL_VERSIONS) / sizeof(SUPPORTED_PROTOCOL_VERSIONS[0]));
 
 static const char MCP_SERVER_INSTRUCTIONS[] =
-    "Graph first: search_graph for symbols, trace_path for relationships, get_code_snippet for "
-    "source, query_graph for multi-hop, and get_architecture for overview. Use search_code/grep "
-    "for literals or coverage gaps. Indexes auto-refresh. Check cited-path coverage; paginate.";
+    "Use search for symbols, trace for relationships, source for exact code, overview for "
+    "orientation, and schema then query for complex graph analysis.";
 
 static const char MCP_ANALYSIS_SERVER_INSTRUCTIONS[] =
-    "analysis tool profile: read-only graph work via search_graph, trace_path, "
-    "get_code_snippet, query_graph, get_architecture, or search_code. Use check_index_coverage "
-    "for cited paths; paginate.";
+    "Analysis profile: use search, trace, source, overview, schema, and read-only query.";
 
 static const char MCP_SCOUT_SERVER_INSTRUCTIONS[] =
-    "scout tool profile: fast positive discovery via search_graph, trace_path, "
-    "get_code_snippet, or get_architecture with narrow limits. Use check_index_coverage for "
-    "cited paths. Findings are provisional.";
+    "Minimal profile: index repositories, then use search, trace, and source.";
 
 static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
                                                      cbm_mcp_tool_profile_t profile) {
@@ -1357,7 +1459,7 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
     yyjson_mut_obj_add_str(doc, root, "protocolVersion", version);
 
     yyjson_mut_val *impl = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, impl, "name", "codebase-memory-mcp");
+    yyjson_mut_obj_add_str(doc, impl, "name", "codegraph-light");
     yyjson_mut_obj_add_str(doc, impl, "version", cbm_cli_get_version());
     yyjson_mut_obj_add_val(doc, root, "serverInfo", impl);
 
@@ -5035,7 +5137,7 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     char *format_arg = cbm_mcp_get_string_arg(args, "format");
     bool json_format = format_arg && strcmp(format_arg, "json") == 0;
     free(format_arg);
-    int limit = cbm_mcp_get_int_arg(args, "limit", CBM_DEFAULT_SEARCH_LIMIT);
+    int limit = cbm_mcp_get_int_arg(args, "limit", 10);
     if (limit < 1) {
         limit = 1;
     } else if (limit > 500) {
@@ -5755,7 +5857,7 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
-    int visible_limit = cbm_mcp_get_int_arg(args, "max_rows", 200);
+    int visible_limit = cbm_mcp_get_int_arg(args, "max_rows", 50);
     if (visible_limit == 0 || visible_limit > MCP_QUERY_MAX_VISIBLE_ROWS) {
         /* compatibility: max_rows=0 used to mean engine default */
         visible_limit = MCP_QUERY_MAX_VISIBLE_ROWS;
@@ -11114,7 +11216,13 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result("index operation cancelled for this request", true);
     }
 
+    /* CodeGraph Light's public index tool intentionally has no mode knob:
+     * graph-only fast indexing is its stable, low-resource contract. */
+#ifdef CBM_CODEGRAPH_LIGHT
+    cbm_index_mode_t mode = CBM_MODE_FAST;
+#else
     cbm_index_mode_t mode = CBM_MODE_FULL;
+#endif
     if (mode_str && strcmp(mode_str, "fast") == 0) {
         mode = CBM_MODE_FAST;
     } else if (mode_str && strcmp(mode_str, "moderate") == 0) {
@@ -17273,9 +17381,39 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── Tool dispatch ────────────────────────────────────────────── */
 
+static const char *mcp_light_bounds_error(const char *tool_name, const char *args) {
+    if (strcmp(tool_name, "search") == 0 && search_graph_arg_present(args, "limit")) {
+        int value = cbm_mcp_get_int_arg(args, "limit", 0);
+        return value < 1 || value > 50 ? "search.limit must be between 1 and 50" : NULL;
+    }
+    if (strcmp(tool_name, "trace") == 0) {
+        if (search_graph_arg_present(args, "depth")) {
+            int value = cbm_mcp_get_int_arg(args, "depth", 0);
+            if (value < 1 || value > 5) return "trace.depth must be between 1 and 5";
+        }
+        if (search_graph_arg_present(args, "limit")) {
+            int value = cbm_mcp_get_int_arg(args, "limit", 0);
+            if (value < 1 || value > 100) return "trace.limit must be between 1 and 100";
+        }
+    }
+    if (strcmp(tool_name, "source") == 0 && search_graph_arg_present(args, "max_lines")) {
+        int value = cbm_mcp_get_int_arg(args, "max_lines", 0);
+        return value < 1 || value > 500 ? "source.max_lines must be between 1 and 500" : NULL;
+    }
+    if (strcmp(tool_name, "query") == 0 && search_graph_arg_present(args, "max_rows")) {
+        int value = cbm_mcp_get_int_arg(args, "max_rows", 0);
+        return value < 1 || value > 500 ? "query.max_rows must be between 1 and 500" : NULL;
+    }
+    return NULL;
+}
+
 static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
     if (!tool_name) {
         return cbm_mcp_text_result("missing tool name", true);
+    }
+    const char *bounds_error = mcp_light_bounds_error(tool_name, args_json);
+    if (bounds_error) {
+        return cbm_mcp_text_result(bounds_error, true);
     }
     if (srv && !mcp_tool_allowed(srv->tool_profile, tool_name)) {
         char message[CBM_SZ_256];
@@ -17283,6 +17421,7 @@ static char *dispatch_tool(cbm_mcp_server_t *srv, const char *tool_name, const c
                  tool_name, mcp_tool_profile_name(srv->tool_profile));
         return cbm_mcp_text_result(message, true);
     }
+    tool_name = mcp_upstream_tool_name(tool_name);
 
     if (strcmp(tool_name, "list_projects") == 0) {
         return handle_list_projects(srv, args_json);

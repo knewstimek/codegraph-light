@@ -147,7 +147,7 @@ bool cbm_daemon_rendezvous_key(char out[CBM_DAEMON_KEY_SIZE]) {
     }
     /* This product-domain string is intentionally the only key input. Account
      * isolation comes from the authenticated IPC runtime, not spoofable text. */
-    static const unsigned char domain[] = "codebase-memory-mcp:coordination-daemon";
+    static const unsigned char domain[] = "codegraph-light:coordination-daemon";
     uint64_t hash = 14695981039346656037ULL;
     for (size_t i = 0; i < sizeof(domain) - 1; i++) {
         hash ^= domain[i];

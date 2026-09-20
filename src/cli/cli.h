@@ -386,7 +386,7 @@ unsigned char *cbm_extract_binary_from_zip(const unsigned char *data, int data_l
 
 /* ── Index management ─────────────────────────────────────────── */
 
-/* List .db files in the cache directory (~/.cache/codebase-memory-mcp/).
+/* List .db files in the cache directory (~/.cache/codegraph-light/).
  * Prints each file path to stdout. Returns count of .db files found. */
 int cbm_list_indexes(const char *home_dir);
 

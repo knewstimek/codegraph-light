@@ -556,7 +556,7 @@ static bool worker_cache_dir(char out[INDEX_WORKER_PATH_CAP]) {
     if (!home[0]) {
         return false;
     }
-    int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s/.cache/codebase-memory-mcp", home);
+    int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s/.cache/codegraph-light", home);
     if (written <= 0 || written >= INDEX_WORKER_PATH_CAP) {
         return false;
     }

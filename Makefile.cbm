@@ -75,7 +75,7 @@ endif
 # CBM_BIND_TS_ALLOCATOR=1: bind the tree-sitter runtime to mimalloc (#424). Only
 # the prod build uses mimalloc (MI_OVERRIDE=1); the test build is CRT+ASan, where
 # binding would create an alloc/free mismatch, so the guard is prod-only.
-CFLAGS_PROD = $(CFLAGS_COMMON) -O2 -DCBM_BIND_TS_ALLOCATOR=1 $(TEST_SEAM_DEFINE) \
+CFLAGS_PROD = $(CFLAGS_COMMON) -O2 -DCBM_BIND_TS_ALLOCATOR=1 -DCBM_CODEGRAPH_LIGHT=1 $(TEST_SEAM_DEFINE) \
               $(GLOBAL_OVERRIDE_DEFINE) $(CFLAGS_EXTRA)
 CXXFLAGS_PROD = $(CXXFLAGS_COMMON) -O2
 
@@ -1010,8 +1010,8 @@ test-tsan: $(BUILD_DIR)/test-runner-tsan
 # Real-binary POSIX lifecycle smoke. The endpoint is deliberately account-wide;
 # an explicit Make invocation requires a clean rendezvous and fails rather than
 # silently skipping an occupied one. Deterministic C tests cover Windows IPC.
-test-daemon-smoke: $(BUILD_DIR)/codebase-memory-mcp
-	cd $(CURDIR) && CBM_DAEMON_SMOKE_REQUIRE_RUN=1 python3 tests/test_daemon_smoke.py $(BUILD_DIR)/codebase-memory-mcp
+test-daemon-smoke: $(BUILD_DIR)/codegraph-light
+	cd $(CURDIR) && CBM_DAEMON_SMOKE_REQUIRE_RUN=1 python3 tests/test_daemon_smoke.py $(BUILD_DIR)/codegraph-light
 
 # ── Production binary ────────────────────────────────────────────
 
@@ -1045,7 +1045,7 @@ ZSTD_OBJ_PROD = $(BUILD_DIR)/prod_zstd.o
 $(BUILD_DIR)/prod_zstd.o: $(CBM_DIR)/vendored/zstd/zstd.c | $(BUILD_DIR)
 	$(CC) -std=c11 -D_DEFAULT_SOURCE -O2 -w -I$(CBM_DIR)/vendored/zstd -c -o $@ $<
 
-OBJS_VENDORED_PROD = $(MIMALLOC_OBJ_PROD) $(SQLITE3_OBJ_PROD) $(TRE_OBJ_PROD) $(GRAMMAR_OBJS_PROD) $(TS_RUNTIME_OBJ_PROD) $(LSP_OBJ_PROD) $(PP_OBJ_PROD) $(LZ4_OBJ_PROD) $(ZSTD_OBJ_PROD) $(UNIXCODER_OBJ)
+OBJS_VENDORED_PROD = $(MIMALLOC_OBJ_PROD) $(SQLITE3_OBJ_PROD) $(TRE_OBJ_PROD) $(GRAMMAR_OBJS_PROD) $(TS_RUNTIME_OBJ_PROD) $(LSP_OBJ_PROD) $(PP_OBJ_PROD) $(LZ4_OBJ_PROD) $(ZSTD_OBJ_PROD)
 
 MAIN_SRC = src/main.c
 
@@ -1071,18 +1071,18 @@ build-config-check:
 $(BUILD_DIR)/.build-config: build-config-check | $(BUILD_DIR)
 	@printf '%s\n' '$(BUILD_CONFIG_SIG)' > $@.tmp
 	@if cmp -s $@.tmp $@; then rm -f $@.tmp; \
-	else mv -f $@.tmp $@; rm -f $(BUILD_DIR)/codebase-memory-mcp; \
+	else mv -f $@.tmp $@; rm -f $(BUILD_DIR)/codegraph-light; \
 	echo "=== build config changed -> full rebuild: $(BUILD_CONFIG_SIG) ==="; fi
 
-$(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
+$(BUILD_DIR)/codegraph-light: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_PROD) -o $@ \
 		$(MAIN_SRC) $(PROD_SRCS) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
 		$(LDFLAGS)
 
-cbm: $(BUILD_DIR)/codebase-memory-mcp
-	@echo "Built: $(BUILD_DIR)/codebase-memory-mcp"
+cbm: $(BUILD_DIR)/codegraph-light
+	@echo "Built: $(BUILD_DIR)/codegraph-light"
 
 # ── Build with embedded UI (requires Node.js) ───────────────────
 
@@ -1100,13 +1100,13 @@ embed: frontend
 	scripts/embed-frontend.sh graph-ui/dist $(BUILD_DIR)/embedded
 
 cbm-with-ui: embed $(OBJS_VENDORED_PROD)
-	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp \
+	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codegraph-light \
 		$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
 		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) \
 		$(LDFLAGS)
-	@echo "Built with UI: $(BUILD_DIR)/codebase-memory-mcp"
+	@echo "Built with UI: $(BUILD_DIR)/codegraph-light"
 
 clean-c: export BUILD_DIR := $(BUILD_DIR)
 clean-c:
@@ -1295,10 +1295,10 @@ lint-mem-ci:
 security: cbm
 	@echo "=== Running security audit suite ==="
 	scripts/security-audit.sh
-	scripts/security-strings.sh $(BUILD_DIR)/codebase-memory-mcp
+	scripts/security-strings.sh $(BUILD_DIR)/codegraph-light
 	scripts/security-ui.sh
-	scripts/security-install.sh $(BUILD_DIR)/codebase-memory-mcp
-	scripts/security-network.sh $(BUILD_DIR)/codebase-memory-mcp
-	scripts/security-fuzz.sh $(BUILD_DIR)/codebase-memory-mcp
+	scripts/security-install.sh $(BUILD_DIR)/codegraph-light
+	scripts/security-network.sh $(BUILD_DIR)/codegraph-light
+	scripts/security-fuzz.sh $(BUILD_DIR)/codegraph-light
 	scripts/security-vendored.sh
 	@echo "=== All security checks passed ==="

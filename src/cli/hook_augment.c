@@ -59,7 +59,7 @@
  *
  * Observability (#858): a fired deadline is otherwise indistinguishable from
  * "no matches", so the handler first write()s a pre-formatted breadcrumb to
- * ~/.cache/codebase-memory-mcp/logs/hook-augment-timeouts.log (fd and message
+ * ~/.cache/codegraph-light/logs/hook-augment-timeouts.log (fd and message
  * prepared at arm time — only async-signal-safe write/_exit in the handler). */
 #ifndef _WIN32
 #define HA_DEADLINE_DEFAULT_MS 2000 /* in-process budget; see ha_deadline_ms()  */
@@ -114,7 +114,7 @@ static void ha_open_crumb_log(int deadline_ms) {
             return;
         }
         char dir[CBM_SZ_1K];
-        snprintf(dir, sizeof(dir), "%s/.cache/codebase-memory-mcp/logs", home);
+        snprintf(dir, sizeof(dir), "%s/.cache/codegraph-light/logs", home);
         cbm_mkdir_p_ex(dir, 0755, CBM_MKDIR_FOLLOW_OWNED);
         snprintf(path, sizeof(path), "%s/hook-augment-timeouts.log", dir);
     }

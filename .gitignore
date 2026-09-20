@@ -1,6 +1,7 @@
 # Binaries
 code-graph-mcp
 /codebase-memory-mcp
+/codegraph-light
 bin/
 *.exe
 *.dll
@@ -43,6 +44,7 @@ reference/
 
 # Local-only scratch / session notes (never pushed)
 private/
+/docs/PLAN.md
 
 # Build artifacts
 build/

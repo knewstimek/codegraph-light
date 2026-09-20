@@ -10,7 +10,7 @@
  *   cli --verbose   Include informational logs for one-shot commands
  *   --ui=true/false Enable/disable HTTP UI server (persisted)
  *   --port=N        Set HTTP UI port (persisted, default 9749)
- *   --tool-profile=analysis|scout  Expose a restricted agent tool surface
+ *   --tool-profile=default|minimal|analysis  Select the MCP tool surface
  *
  * Long-lived MCP and hook frontends are thin clients of one mandatory
  * per-account daemon. One-shot CLI tool calls run in an isolated local server
@@ -1071,7 +1071,7 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
 /* ── Help ───────────────────────────────────────────────────────── */
 
 static void print_help(void) {
-    printf("codebase-memory-mcp %s\n\n", CBM_VERSION);
+    printf("codegraph-light %s\n\n", CBM_VERSION);
     printf("Usage:\n");
     printf("  codebase-memory-mcp              Run MCP server on stdio\n");
     printf("  codebase-memory-mcp cli [--quiet] [--progress] [--verbose] [--json] <tool> "
@@ -1084,7 +1084,7 @@ static void print_help(void) {
     printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run]\n");
     printf("  codebase-memory-mcp update [-y|-n]\n");
     printf("  codebase-memory-mcp config <list|get|set|reset>\n");
-    printf("  codebase-memory-mcp --version    Print version\n");
+    printf("  codegraph-light --version        Print version\n");
     printf("  codebase-memory-mcp --help       Print this help\n");
     printf("\nCLI output options:\n");
     printf("  --quiet       Show errors only; disable automatic terminal progress\n");
@@ -1096,7 +1096,7 @@ static void print_help(void) {
     printf("  --ui=true    Enable HTTP graph visualization (persisted)\n");
     printf("  --ui=false   Disable HTTP graph visualization (persisted)\n");
     printf("  --port=N     Set UI port (default 9749, persisted)\n");
-    printf("  --tool-profile=analysis|scout  Expose a restricted inspection surface\n");
+    printf("  --tool-profile=default|minimal|analysis  Select the MCP tool surface\n");
     printf("\nSupported automatic/conditional client surfaces (45):\n");
     printf("  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,\n");
     printf("  Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf,\n");
@@ -1234,7 +1234,7 @@ static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *
     }
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
-            printf("codebase-memory-mcp %s\n", CBM_VERSION);
+            printf("codegraph-light %s\n", CBM_VERSION);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -2736,8 +2736,8 @@ int main(int argc, char **argv) {
     cbm_mcp_tool_profile_t tool_profile = CBM_MCP_TOOL_PROFILE_ALL;
     if (role == CBM_DAEMON_PROCESS_MCP_CLIENT &&
         cbm_mcp_parse_tool_profile_args(argc, (const char *const *)argv, &tool_profile) != 0) {
-        (void)fprintf(stderr, "codebase-memory-mcp: --tool-profile requires the supported value "
-                              "'analysis' or 'scout'\n");
+        (void)fprintf(stderr, "codegraph-light: --tool-profile requires the supported value "
+                              "'default', 'minimal', or 'analysis'\n");
         return 2;
     }
     const char *hook_event = NULL;

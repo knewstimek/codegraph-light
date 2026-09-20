@@ -1902,15 +1902,24 @@ TEST(server_handle_tools_list) {
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":2"));
-    ASSERT_NOT_NULL(strstr(resp, "search_graph"));
-    ASSERT_NOT_NULL(strstr(resp, "query_graph"));
+    static const char *const tools[] = {"index", "search", "trace", "source",
+                                        "overview", "schema", "query"};
+    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    /* Keep a tokenizer-neutral wire-size guard in the native suite. Release CI
+     * performs the model-tokenizer check against the same response. */
+    ASSERT_TRUE(strlen(resp) < 5000U);
+    for (size_t i = 0U; i < sizeof(tools) / sizeof(tools[0]); i++) {
+        ASSERT_TRUE(mcp_response_has_exact_tool(resp, tools[i]));
+    }
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_graph"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
     free(resp);
 
     cbm_mcp_server_free(srv);
     PASS();
 }
 
-TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
+TEST(server_handle_tools_list_defaults_to_light_surface) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
     char *resp =
@@ -1918,9 +1927,10 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":200"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_NOT_NULL(strstr(resp, "index_repository"));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "query"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "manage_adr"));
     free(resp);
 
     resp = cbm_mcp_server_handle(
@@ -1928,41 +1938,39 @@ TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    ASSERT_NOT_NULL(strstr(resp, "ingest_traces"));
+    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
     free(resp);
 
-    /* A cursored page advertises nextCursor exactly while tools remain after
-     * it. This used to pass the literal cursor "8", which silently encoded
-     * "there are at most MCP_TOOLS_PAGE_SIZE * 2 tools" -- so registering a
-     * 17th tool broke it for a reason that had nothing to do with pagination.
-     * Derive the offset from the live count instead: the final page, wherever
-     * it falls, is the one that must not advertise more. */
-    resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":203,\"method\":\"tools/list\"}");
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(server_handle_light_aliases_dispatch_and_legacy_names_are_hidden) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":205,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"schema\",\"arguments\":{\"project\":\"missing\"}}}");
     ASSERT_NOT_NULL(resp);
-    size_t total_tools = mcp_response_tool_count(resp);
-    free(resp);
-    ASSERT_TRUE(total_tools > 1U);
-
-    char last_page_req[160];
-    snprintf(last_page_req, sizeof(last_page_req),
-             "{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/list\","
-             "\"params\":{\"cursor\":\"%zu\"}}",
-             total_tools - 1U);
-    resp = cbm_mcp_server_handle(srv, last_page_req);
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "\"id\":201"));
-    ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_EQ(mcp_response_tool_count(resp), 1U);
+    ASSERT_NULL(strstr(resp, "unknown tool"));
     free(resp);
 
-    /* ...and a page that does have tools after it MUST advertise the cursor,
-     * so the assertion above cannot pass merely because paging never emits. */
     resp = cbm_mcp_server_handle(
-        srv,
-        "{\"jsonrpc\":\"2.0\",\"id\":204,\"method\":\"tools/list\",\"params\":{\"cursor\":\"0\"}}");
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":206,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"get_graph_schema\","
+             "\"arguments\":{\"project\":\"missing\"}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\""));
+    ASSERT_NOT_NULL(strstr(resp, "not available in the default tool profile"));
+    free(resp);
+
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":207,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"query\",\"arguments\":{\"project\":\"missing\","
+             "\"query\":\"MATCH (n) RETURN n\",\"max_rows\":501}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "query.max_rows must be between 1 and 500"));
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -1977,18 +1985,14 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":219,\"method\":\"initialize\",\"params\":{}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "analysis tool profile"));
-    ASSERT_NOT_NULL(strstr(resp, "check_index_coverage"));
-    ASSERT_NULL(strstr(resp, "index_repository"));
+    ASSERT_NOT_NULL(strstr(resp, "Analysis profile"));
+    ASSERT_NOT_NULL(strstr(resp, "read-only query"));
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":220,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",      "trace_path",     "get_code_snippet",
-        "get_file_outline", "get_graph_schema", "compare_graphs", "get_architecture",
-        "search_code",      "list_projects",    "index_status",   "check_index_coverage",
-        "detect_changes",
+        "search", "query", "trace", "source", "schema", "overview",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1997,7 +2001,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":221,\"method\":\"tools/call\","
-                                      "\"params\":{\"name\":\"delete_project\","
+                                      "\"params\":{\"name\":\"index\","
                                       "\"arguments\":{\"project\":\"anything\"}}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "not available in the analysis tool profile"));
@@ -2008,7 +2012,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     PASS();
 }
 
-TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
+TEST(server_handle_minimal_profile_exposes_four_tools) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     ASSERT_NOT_NULL(srv);
     cbm_mcp_server_set_tool_profile(srv, CBM_MCP_TOOL_PROFILE_SCOUT);
@@ -2019,35 +2023,26 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
         srv, "{\"jsonrpc\":\"2.0\",\"id\":222,\"method\":\"initialize\",\"params\":{}}");
     cbm_log_set_sink(NULL);
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "scout tool profile"));
-    ASSERT_NOT_NULL(strstr(resp, "check_index_coverage"));
-    ASSERT_NULL(strstr(resp, "index_repository"));
+    ASSERT_NOT_NULL(strstr(resp, "Minimal profile"));
     ASSERT_FALSE(mcp_saw_autoindex_log);
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":223,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search_graph"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace_path"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_code_snippet"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_file_outline"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_architecture"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "list_projects"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index_status"));
-    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "check_index_coverage"));
-    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query_graph"));
-    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "search_code"));
-    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "get_graph_schema"));
-    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "compare_graphs"));
-    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "detect_changes"));
-    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "index_repository"));
+    ASSERT_EQ(mcp_response_tool_count(resp), 4U);
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "source"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "query"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "schema"));
+    ASSERT_FALSE(mcp_response_has_exact_tool(resp, "overview"));
     free(resp);
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":224,\"method\":\"tools/call\","
-                                      "\"params\":{\"name\":\"query_graph\",\"arguments\":{}}}");
+                                      "\"params\":{\"name\":\"query\",\"arguments\":{}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not available in the scout tool profile"));
+    ASSERT_NOT_NULL(strstr(resp, "not available in the minimal tool profile"));
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
@@ -2060,7 +2055,8 @@ TEST(analysis_profile_arguments_fail_closed_and_disable_http) {
     const char *no_profile[] = {"codebase-memory-mcp"};
     const char *analysis_equals[] = {"codebase-memory-mcp", "--tool-profile=analysis"};
     const char *analysis_pair[] = {"codebase-memory-mcp", "--tool-profile", "analysis"};
-    const char *scout_equals[] = {"codebase-memory-mcp", "--tool-profile=scout"};
+    const char *minimal_equals[] = {"codegraph-light", "--tool-profile=minimal"};
+    const char *default_equals[] = {"codegraph-light", "--tool-profile=default"};
     const char *unknown_equals[] = {"codebase-memory-mcp", "--tool-profile=analaysis"};
     const char *unknown_pair[] = {"codebase-memory-mcp", "--tool-profile", "all"};
     const char *missing_value[] = {"codebase-memory-mcp", "--tool-profile"};
@@ -2075,9 +2071,11 @@ TEST(analysis_profile_arguments_fail_closed_and_disable_http) {
 
     ASSERT_EQ(cbm_mcp_parse_tool_profile_args(3, analysis_pair, &profile), 0);
     ASSERT_EQ(profile, CBM_MCP_TOOL_PROFILE_ANALYSIS);
-    ASSERT_EQ(cbm_mcp_parse_tool_profile_args(2, scout_equals, &profile), 0);
+    ASSERT_EQ(cbm_mcp_parse_tool_profile_args(2, minimal_equals, &profile), 0);
     ASSERT_EQ(profile, CBM_MCP_TOOL_PROFILE_SCOUT);
     ASSERT_FALSE(cbm_mcp_tool_profile_allows_http(profile));
+    ASSERT_EQ(cbm_mcp_parse_tool_profile_args(2, default_equals, &profile), 0);
+    ASSERT_EQ(profile, CBM_MCP_TOOL_PROFILE_ALL);
     ASSERT_EQ(cbm_mcp_parse_tool_profile_args(2, unknown_equals, &profile), -1);
     ASSERT_EQ(cbm_mcp_parse_tool_profile_args(3, unknown_pair, &profile), -1);
     ASSERT_EQ(cbm_mcp_parse_tool_profile_args(2, missing_value, &profile), -1);
@@ -20317,9 +20315,10 @@ SUITE(mcp) {
     RUN_TEST(mcp_issue403_explicit_approval_preserves_auto_index);
 #endif
     RUN_TEST(server_handle_tools_list);
-    RUN_TEST(server_handle_tools_list_defaults_to_all_tools_and_accepts_cursor);
+    RUN_TEST(server_handle_tools_list_defaults_to_light_surface);
+    RUN_TEST(server_handle_light_aliases_dispatch_and_legacy_names_are_hidden);
     RUN_TEST(server_handle_analysis_profile_filters_and_rejects_mutators);
-    RUN_TEST(server_handle_scout_profile_exposes_only_the_fast_tier);
+    RUN_TEST(server_handle_minimal_profile_exposes_four_tools);
     RUN_TEST(analysis_profile_arguments_fail_closed_and_disable_http);
     RUN_TEST(hook_windows_path_containment_is_case_insensitive_and_segment_safe);
     RUN_TEST(server_handle_prompts_list_workflows);

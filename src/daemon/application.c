@@ -625,7 +625,7 @@ static bool application_cache_dir(char out[APPLICATION_PATH_CAP]) {
     if (!home[0]) {
         return false;
     }
-    int written = snprintf(out, APPLICATION_PATH_CAP, "%s/.cache/codebase-memory-mcp", home);
+    int written = snprintf(out, APPLICATION_PATH_CAP, "%s/.cache/codegraph-light", home);
     if (written <= 0 || written >= APPLICATION_PATH_CAP) {
         return false;
     }

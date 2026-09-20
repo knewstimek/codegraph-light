@@ -15,7 +15,9 @@
 #include "foundation/compat_thread.h"
 #include "pipeline/worker_pool.h"
 #include "simhash/minhash.h"
+#ifndef CBM_CODEGRAPH_LIGHT
 #include "nomic/code_vectors.h"
+#endif
 
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
@@ -390,6 +392,7 @@ float cbm_sem_cosine(const cbm_sem_vec_t *a, const cbm_sem_vec_t *b) {
 }
 
 /* Pretrained token lookup table — built lazily on first use. */
+#ifndef CBM_CODEGRAPH_LIGHT
 static CBMHashTable *g_pretrained_map = NULL;
 static _Atomic int g_pretrained_ready = 0;
 static cbm_mutex_t g_pretrained_mtx;
@@ -431,6 +434,9 @@ static void ensure_pretrained_map(void) {
     }
     cbm_mutex_unlock(&g_pretrained_mtx);
 }
+#else
+static void ensure_pretrained_map(void) {}
+#endif
 
 void cbm_sem_ensure_ready(void) {
     ensure_pretrained_map();
@@ -442,7 +448,9 @@ void cbm_sem_random_index(const char *token, cbm_sem_vec_t *out) {
         return;
     }
 
-    /* Try pretrained nomic-embed-code vector first (768d, distilled from 7B). */
+    /* The light build omits the 31 MB pretrained blob and always uses the
+     * deterministic sparse fallback below. */
+#ifndef CBM_CODEGRAPH_LIGHT
     ensure_pretrained_map();
     const char *idx_str = cbm_ht_get(g_pretrained_map, token);
     if (idx_str) {
@@ -456,6 +464,7 @@ void cbm_sem_random_index(const char *token, cbm_sem_vec_t *out) {
             return;
         }
     }
+#endif
 
     /* Fallback: sparse random vector for tokens not in pretrained vocab. */
     uint64_t seed = XXH3_64bits(token, strlen(token));
@@ -1106,6 +1115,7 @@ static void build_src_entry(const char *token, cbm_sem_src_entry_t *out) {
         return;
     }
     /* Dense path: direct int8 pointer into pretrained blob (zero-copy). */
+#ifndef CBM_CODEGRAPH_LIGHT
     const char *idx_str = cbm_ht_get(g_pretrained_map, token);
     if (idx_str) {
         char *end = NULL;
@@ -1116,6 +1126,7 @@ static void build_src_entry(const char *token, cbm_sem_src_entry_t *out) {
             return;
         }
     }
+#endif
     /* Sparse path: compute 8 hash positions with collision merging. */
     out->is_sparse = SKIP_ONE;
     uint16_t tmp_idx[CBM_SEM_SPARSE_NNZE];
