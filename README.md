@@ -13,12 +13,11 @@ The project is designed around three constraints:
 
 ## Tools
 
-The default profile exposes eight tools:
+The default profile exposes seven tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `index` | Build or refresh any repository graph; use an absolute path outside the current session root. |
-| `projects` | List indexed graphs and their repository roots, including graphs shared by other sessions. |
+| `index` | Build or refresh a repository graph. |
 | `search` | Find code symbols by name, kind, or path. |
 | `trace` | Find callers, callees, and call paths. |
 | `source` | Return source code for a graph symbol. |
@@ -26,15 +25,19 @@ The default profile exposes eight tools:
 | `schema` | Describe graph nodes, properties, and relationships. |
 | `query` | Run a bounded, read-only graph query. |
 
+Read tools accept either an indexed project ID or an absolute repository path
+as `project`. This allows one session to query a known repository outside its
+current working root without adding another discovery tool.
+
 ## Profiles
 
 `default` is selected when `--tool-profile` is omitted.
 
 | Profile | Tools |
 | --- | --- |
-| `default` | All eight tools |
+| `default` | All seven tools |
 | `minimal` | `index`, `search`, `trace`, `source` |
-| `analysis` | `projects`, `search`, `trace`, `source`, `overview`, `schema`, `query` |
+| `analysis` | `search`, `trace`, `source`, `overview`, `schema`, `query` |
 
 Example MCP configuration:
 

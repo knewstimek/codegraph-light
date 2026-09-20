@@ -806,7 +806,6 @@ static const tool_annotation_def_t *mcp_tool_annotations(const char *name) {
  * agent session's context window. */
 static const char *mcp_light_tool_name(const char *name) {
     if (strcmp(name, "index_repository") == 0) return "index";
-    if (strcmp(name, "list_projects") == 0) return "projects";
     if (strcmp(name, "search_graph") == 0) return "search";
     if (strcmp(name, "trace_path") == 0) return "trace";
     if (strcmp(name, "get_code_snippet") == 0) return "source";
@@ -819,7 +818,6 @@ static const char *mcp_light_tool_name(const char *name) {
 static const char *mcp_upstream_tool_name(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "index") == 0) return "index_repository";
-    if (strcmp(name, "projects") == 0) return "list_projects";
     if (strcmp(name, "search") == 0) return "search_graph";
     if (strcmp(name, "trace") == 0) return "trace_path";
     if (strcmp(name, "source") == 0) return "get_code_snippet";
@@ -830,12 +828,7 @@ static const char *mcp_upstream_tool_name(const char *name) {
 }
 
 static const char *mcp_light_tool_description(const char *name) {
-    if (strcmp(name, "index_repository") == 0)
-        return "Build or refresh any repository graph. Use an absolute path outside the current "
-               "session root; the returned project ID works in every query tool.";
-    if (strcmp(name, "list_projects") == 0)
-        return "List indexed graphs and repository roots, including graphs published by other "
-               "sessions that share this cache.";
+    if (strcmp(name, "index_repository") == 0) return "Build or refresh a repository graph.";
     if (strcmp(name, "search_graph") == 0) return "Find code symbols by name, kind, or path.";
     if (strcmp(name, "trace_path") == 0) return "Find callers, callees, and call paths.";
     if (strcmp(name, "get_code_snippet") == 0) return "Return source code for a graph symbol.";
@@ -846,20 +839,12 @@ static const char *mcp_light_tool_description(const char *name) {
 }
 
 #define MCP_LIGHT_PROJECT_SCHEMA                                                               \
-    "\"project\":{\"type\":\"string\",\"description\":\"Project ID from projects or "        \
-    "repository path; use an absolute path outside the current session root.\"}"
+    "\"project\":{\"type\":\"string\",\"description\":\"ID or absolute repo path.\"}"
 
 static const char *mcp_light_tool_schema(const char *name) {
     if (strcmp(name, "index_repository") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"repo_path\":{\"type\":\"string\","
-               "\"description\":\"Repository path. Use an absolute path outside the current "
-               "session root.\"}},"
+        return "{\"type\":\"object\",\"properties\":{\"repo_path\":{\"type\":\"string\"}},"
                "\"required\":[\"repo_path\"],\"additionalProperties\":false}";
-    }
-    if (strcmp(name, "list_projects") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\","
-               "\"minimum\":1,\"maximum\":500,\"default\":50},\"offset\":{\"type\":"
-               "\"integer\",\"minimum\":0,\"default\":0}},\"additionalProperties\":false}";
     }
     if (strcmp(name, "search_graph") == 0) {
         return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
@@ -948,7 +933,7 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
 static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
         "search_graph", "query_graph", "trace_path", "get_code_snippet",
-        "get_graph_schema", "get_architecture", "list_projects",
+        "get_graph_schema", "get_architecture",
     };
     static const char *const minimal_tools[] = {
         "index_repository", "search_graph", "trace_path", "get_code_snippet",
@@ -2757,10 +2742,9 @@ static char *build_project_list_error(const char *reason) {
     if (count > 0) {
 #ifdef CBM_CODEGRAPH_LIGHT
         snprintf(buf, sizeof(buf),
-                 "{\"error\":\"%s\",\"hint\":\"Call projects to inspect indexed roots, then "
-                 "pass either its project ID or the repository's absolute path as the "
-                 "\\\"project\\\" argument. Call index with an absolute repo_path if it is not "
-                 "listed.\",\"available_projects\":[%s],\"count\":%d}",
+                 "{\"error\":\"%s\",\"hint\":\"Pass an ID from available_projects or an "
+                 "absolute repository path as \\\"project\\\"; call index with an absolute "
+                 "repo_path if needed.\",\"available_projects\":[%s],\"count\":%d}",
                  reason, projects, count);
 #else
         snprintf(buf, sizeof(buf),
@@ -2791,8 +2775,7 @@ static char *build_project_list_error(const char *reason) {
 static char *build_missing_project_error(void) {
 #ifdef CBM_CODEGRAPH_LIGHT
     return heap_strdup("{\"error\":\"missing required argument: project\",\"hint\":\"Pass "
-                       "either a project ID from projects or an absolute repository path as the "
-                       "\\\"project\\\" argument.\"}");
+                       "a project ID or absolute repository path as \\\"project\\\".\"}");
 #else
     return heap_strdup("{\"error\":\"missing required argument: project\",\"hint\":\"Pass "
                        "the project as the \\\"project\\\" argument, e.g. "

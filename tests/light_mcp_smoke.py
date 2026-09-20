@@ -13,9 +13,9 @@ from pathlib import Path
 
 
 PROFILES = {
-    "default": ["index", "projects", "search", "trace", "source", "overview", "schema", "query"],
+    "default": ["index", "search", "trace", "source", "overview", "schema", "query"],
     "minimal": ["index", "search", "trace", "source"],
-    "analysis": ["projects", "search", "trace", "source", "overview", "schema", "query"],
+    "analysis": ["search", "trace", "source", "overview", "schema", "query"],
 }
 
 
@@ -155,12 +155,6 @@ def inspect_graph_roundtrip(binary: Path) -> None:
                 request(proc, 11, "tools/call", {"name": "index", "arguments": {"repo_path": str(fixture)}}),
                 "index",
             )
-            projects = assert_call_ok(
-                request(proc, 111, "tools/call", {"name": "projects", "arguments": {}}),
-                "projects",
-            )
-            if fixture.name not in json.dumps(projects, ensure_ascii=False):
-                raise AssertionError(f"projects: indexed repository root was not returned: {projects!r}")
             searched = assert_call_ok(
                 request(
                     proc,
