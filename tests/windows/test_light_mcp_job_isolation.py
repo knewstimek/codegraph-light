@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CodeGraph Light MCP sessions must not share a Windows-job-owned daemon."""
+"""CodeGraph Light MCP sessions and index crashes stay process-isolated."""
 
 from __future__ import annotations
 
@@ -116,6 +116,14 @@ def assert_ok(response: dict, label: str) -> None:
         raise AssertionError(f"{label} failed: {response!r}")
 
 
+def tool_text(response: dict) -> str:
+    return "".join(
+        item.get("text", "")
+        for item in response.get("result", {}).get("content", [])
+        if item.get("type") == "text"
+    )
+
+
 def resume_process_thread(pid: int) -> None:
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
     if snapshot == INVALID_HANDLE_VALUE:
@@ -230,6 +238,8 @@ def main() -> int:
         env = dict(os.environ)
         env["CBM_CACHE_DIR"] = str(cache)
         env["CBM_RUNTIME_DIR"] = str(runtime)
+        env["CBM_INDEX_MAX_RESTARTS"] = "5"
+        env["CBM_TEST_CRASH_ON"] = "synthetic_index_crash.py"
         try:
             owner = spawn(binary, repository, env, suspended=True)
             job = create_kill_on_close_job()
@@ -244,8 +254,37 @@ def main() -> int:
                     "tools/call",
                     {"name": "index", "arguments": {"repo_path": str(repository)}},
                 ),
-                "index",
+                "initial index",
             )
+            (repository / "synthetic_index_crash.py").write_text(
+                "def should_never_publish():\n    return 0\n",
+                encoding="utf-8",
+            )
+            contained_response = request(
+                owner,
+                5,
+                "tools/call",
+                {"name": "index", "arguments": {"repo_path": str(repository)}},
+            )
+            contained_text = tool_text(contained_response)
+            contained_result = contained_response.get("result", {})
+            contained_detail = contained_result.get("structuredContent", {})
+            recovered = (
+                not contained_result.get("isError")
+                and '"status":"indexed"' in contained_text
+                and "synthetic_index_crash.py" in contained_text
+            )
+            structured_failure = (
+                contained_result.get("isError")
+                and contained_detail.get("status")
+                in {"error", "aborted_no_previous_index", "aborted_previous_preserved"}
+            )
+            if not (recovered or structured_failure) or owner.poll() is not None:
+                raise AssertionError(
+                    "index crash did not cross the supervised-worker boundary: "
+                    f"response={contained_text[-2000:]!r}, exit={owner.poll()}"
+                )
+            assert_ok(request(owner, 6, "tools/list", {}), "post-crash owner tools/list")
 
             peer = spawn(binary, repository, env)
             initialize(peer, 3)
@@ -281,7 +320,10 @@ def main() -> int:
             ids = sorted(response.get("id") for response in responses)
             if ids != [10, 11, 12, 13] or peer.poll() is not None:
                 raise AssertionError(f"peer did not remain serviceable: ids={ids}, exit={peer.poll()}")
-            print("PASS: closing one restrictive MCP job preserved all four peer trace responses")
+            print(
+                "PASS: index crash stayed in its worker and closing one restrictive MCP job "
+                "preserved all four peer trace responses"
+            )
             return 0
         finally:
             if job:

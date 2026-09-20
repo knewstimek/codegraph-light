@@ -1449,6 +1449,31 @@ static main_build_identity_status_t main_build_identity(cbm_daemon_build_identit
     return MAIN_BUILD_IDENTITY_OK;
 }
 
+#ifdef CBM_CODEGRAPH_LIGHT
+/* The light product serves MCP in this process, without the account-wide daemon.
+ * It still needs the same immutable executable identity as every other physical
+ * host before index dispatch: the supervisor re-execs this exact binary and the
+ * worker refuses a mismatched image. Keep this preparation separate from daemon
+ * identity/cohort setup so process-local MCP startup never acquires shared-daemon
+ * lifetime state. */
+static bool main_prepare_light_mcp_index_supervisor(const char *argv0) {
+    char executable_path[MAIN_PATH_CAP];
+    if (!main_resolve_executable(argv0, executable_path)) {
+        (void)fprintf(stderr,
+                      "codegraph-light: index supervisor executable path could not be resolved\n");
+        return false;
+    }
+    cbm_http_server_set_binary_path(executable_path);
+    if (!cbm_index_supervisor_capture_build_fingerprint()) {
+        (void)fprintf(stderr,
+                      "codegraph-light: index supervisor build identity could not be captured\n");
+        return false;
+    }
+    cbm_index_supervisor_mark_host();
+    return true;
+}
+#endif
+
 static uint64_t main_deadline_after(uint32_t timeout_ms) {
     uint64_t now_ms = cbm_now_ms();
     return now_ms > UINT64_MAX - timeout_ms ? UINT64_MAX : now_ms + timeout_ms;
@@ -2980,13 +3005,17 @@ int main(int argc, char **argv) {
          * small stdio product. In particular, Windows can place the spawning
          * frontend in a non-breakaway KILL_ON_JOB_CLOSE job; closing that one
          * frontend then kills the daemon underneath every unrelated session.
-         * Enter the process-local server before executable hashing and daemon
-         * rendezvous so startup is independent of both shared-daemon state and
-         * the size of this monolithic executable. Supervised index workers
-         * retain the publication and crash-containment boundary. */
+         * Enter the process-local server without daemon rendezvous so sessions
+         * remain lifetime-independent. The one host-level preparation retained
+         * here pins this running image and enables supervised index workers;
+         * otherwise an indexer fault executes in this frontend and closes the
+         * MCP transport it was meant to protect. */
         if (!client_start_parent_watchdog(process_initial_ppid)) {
             (void)fprintf(stderr,
                           "codegraph-light: standalone parent-death watchdog could not start\n");
+            return EXIT_FAILURE;
+        }
+        if (!main_prepare_light_mcp_index_supervisor(argv[0])) {
             return EXIT_FAILURE;
         }
         setup_signal_handlers();
