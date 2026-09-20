@@ -806,6 +806,7 @@ static const tool_annotation_def_t *mcp_tool_annotations(const char *name) {
  * agent session's context window. */
 static const char *mcp_light_tool_name(const char *name) {
     if (strcmp(name, "index_repository") == 0) return "index";
+    if (strcmp(name, "list_projects") == 0) return "projects";
     if (strcmp(name, "search_graph") == 0) return "search";
     if (strcmp(name, "trace_path") == 0) return "trace";
     if (strcmp(name, "get_code_snippet") == 0) return "source";
@@ -818,6 +819,7 @@ static const char *mcp_light_tool_name(const char *name) {
 static const char *mcp_upstream_tool_name(const char *name) {
     if (!name) return NULL;
     if (strcmp(name, "index") == 0) return "index_repository";
+    if (strcmp(name, "projects") == 0) return "list_projects";
     if (strcmp(name, "search") == 0) return "search_graph";
     if (strcmp(name, "trace") == 0) return "trace_path";
     if (strcmp(name, "source") == 0) return "get_code_snippet";
@@ -828,7 +830,12 @@ static const char *mcp_upstream_tool_name(const char *name) {
 }
 
 static const char *mcp_light_tool_description(const char *name) {
-    if (strcmp(name, "index_repository") == 0) return "Build or refresh a repository graph.";
+    if (strcmp(name, "index_repository") == 0)
+        return "Build or refresh any repository graph. Use an absolute path outside the current "
+               "session root; the returned project ID works in every query tool.";
+    if (strcmp(name, "list_projects") == 0)
+        return "List indexed graphs and repository roots, including graphs published by other "
+               "sessions that share this cache.";
     if (strcmp(name, "search_graph") == 0) return "Find code symbols by name, kind, or path.";
     if (strcmp(name, "trace_path") == 0) return "Find callers, callees, and call paths.";
     if (strcmp(name, "get_code_snippet") == 0) return "Return source code for a graph symbol.";
@@ -838,20 +845,31 @@ static const char *mcp_light_tool_description(const char *name) {
     return NULL;
 }
 
+#define MCP_LIGHT_PROJECT_SCHEMA                                                               \
+    "\"project\":{\"type\":\"string\",\"description\":\"Project ID from projects or "        \
+    "repository path; use an absolute path outside the current session root.\"}"
+
 static const char *mcp_light_tool_schema(const char *name) {
     if (strcmp(name, "index_repository") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"repo_path\":{\"type\":\"string\"}},"
+        return "{\"type\":\"object\",\"properties\":{\"repo_path\":{\"type\":\"string\","
+               "\"description\":\"Repository path. Use an absolute path outside the current "
+               "session root.\"}},"
                "\"required\":[\"repo_path\"],\"additionalProperties\":false}";
     }
+    if (strcmp(name, "list_projects") == 0) {
+        return "{\"type\":\"object\",\"properties\":{\"limit\":{\"type\":\"integer\","
+               "\"minimum\":1,\"maximum\":500,\"default\":50},\"offset\":{\"type\":"
+               "\"integer\",\"minimum\":0,\"default\":0}},\"additionalProperties\":false}";
+    }
     if (strcmp(name, "search_graph") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+        return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
                "\"query\":{\"type\":\"string\"},\"label\":{\"type\":\"string\"},"
                "\"file_pattern\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\","
                "\"minimum\":1,\"maximum\":50,\"default\":10}},\"required\":[\"project\"],"
                "\"additionalProperties\":false}";
     }
     if (strcmp(name, "trace_path") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+        return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
                "\"function_name\":{\"type\":\"string\"},\"direction\":{\"type\":\"string\","
                "\"enum\":[\"inbound\",\"outbound\",\"both\"],\"default\":\"both\"},"
                "\"depth\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":5,\"default\":2},"
@@ -860,30 +878,32 @@ static const char *mcp_light_tool_schema(const char *name) {
                "\"additionalProperties\":false}";
     }
     if (strcmp(name, "get_code_snippet") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+        return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
                "\"qualified_name\":{\"type\":\"string\"},\"max_lines\":{\"type\":\"integer\","
                "\"minimum\":1,\"maximum\":500,\"default\":120}},"
                "\"required\":[\"project\",\"qualified_name\"],\"additionalProperties\":false}";
     }
     if (strcmp(name, "get_architecture") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+        return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
                "\"path\":{\"type\":\"string\"}},\"required\":[\"project\"],"
                "\"additionalProperties\":false}";
     }
     if (strcmp(name, "get_graph_schema") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+        return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
                "\"diagnostics\":{\"type\":\"string\",\"enum\":[\"none\",\"full\"],"
                "\"default\":\"none\"}},\"required\":[\"project\"],"
                "\"additionalProperties\":false}";
     }
     if (strcmp(name, "query_graph") == 0) {
-        return "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},"
+        return "{\"type\":\"object\",\"properties\":{" MCP_LIGHT_PROJECT_SCHEMA ","
                "\"query\":{\"type\":\"string\"},\"max_rows\":{\"type\":\"integer\","
                "\"minimum\":1,\"maximum\":500,\"default\":50},\"cursor\":{\"type\":\"string\"}},"
                "\"required\":[\"project\",\"query\"],\"additionalProperties\":false}";
     }
     return NULL;
 }
+
+#undef MCP_LIGHT_PROJECT_SCHEMA
 
 static void mcp_add_json_schema(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
                                 const char *schema_json) {
@@ -928,7 +948,7 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
 static bool mcp_tool_allowed(cbm_mcp_tool_profile_t profile, const char *name) {
     static const char *const analysis_tools[] = {
         "search_graph", "query_graph", "trace_path", "get_code_snippet",
-        "get_graph_schema", "get_architecture",
+        "get_graph_schema", "get_architecture", "list_projects",
     };
     static const char *const minimal_tools[] = {
         "index_repository", "search_graph", "trace_path", "get_code_snippet",
@@ -1582,6 +1602,87 @@ static bool repo_path_is_absolute(const char *path) {
 #endif
 }
 
+/* Forward decls — defined below alongside store resolution. */
+static const char *cache_dir(char *buf, size_t bufsz);
+static bool is_project_db_file(const char *name, size_t len);
+bool cbm_validate_project_name(const char *project);
+
+static bool project_root_paths_equal(const char *left, const char *right) {
+    if (!left || !right || !left[0] || !right[0]) {
+        return false;
+    }
+    char canonical_left[CBM_SZ_4K];
+    char canonical_right[CBM_SZ_4K];
+    if (!cbm_canonical_path(left, canonical_left, sizeof(canonical_left)) ||
+        !cbm_canonical_path(right, canonical_right, sizeof(canonical_right))) {
+        return false;
+    }
+    cbm_normalize_path_sep(canonical_left);
+    cbm_normalize_path_sep(canonical_right);
+#ifdef _WIN32
+    return _stricmp(canonical_left, canonical_right) == 0;
+#else
+    return strcmp(canonical_left, canonical_right) == 0;
+#endif
+}
+
+/* A path-derived project key is normally enough, but index_repository permits
+ * an explicit name override. In that case every read tool used to turn the
+ * caller's exact repository path into the default key and report a false
+ * "project not found", even though list_projects exposed the matching stored
+ * root. Resolve a unique stored root before falling back to the derived key.
+ * Query-only opens keep this discovery non-mutating and make graphs published
+ * by another MCP process immediately addressable by repository path. */
+static char *project_name_from_indexed_root(const char *root_path) {
+    char dir[CBM_SZ_1K];
+    cache_dir(dir, sizeof(dir));
+    cbm_dir_t *directory = cbm_opendir(dir);
+    if (!directory) {
+        return NULL;
+    }
+
+    char *match = NULL;
+    bool ambiguous = false;
+    cbm_dirent_t *entry;
+    while (!ambiguous && (entry = cbm_readdir(directory)) != NULL) {
+        const char *filename = entry->name;
+        size_t filename_len = strlen(filename);
+        if (!is_project_db_file(filename, filename_len)) {
+            continue;
+        }
+        char db_path[CBM_SZ_2K];
+        snprintf(db_path, sizeof(db_path), "%s/%s", dir, filename);
+        cbm_store_t *store = cbm_store_open_path_query(db_path);
+        if (!store) {
+            continue;
+        }
+        cbm_project_t *projects = NULL;
+        int project_count = 0;
+        if (cbm_store_list_projects(store, &projects, &project_count) == CBM_STORE_OK) {
+            for (int i = 0; i < project_count; i++) {
+                if (!project_root_paths_equal(root_path, projects[i].root_path)) {
+                    continue;
+                }
+                if (match && strcmp(match, projects[i].name) != 0) {
+                    ambiguous = true;
+                    break;
+                }
+                if (!match) {
+                    match = heap_strdup(projects[i].name);
+                }
+            }
+            cbm_store_free_projects(projects, project_count);
+        }
+        cbm_store_close(store);
+    }
+    cbm_closedir(directory);
+    if (ambiguous) {
+        free(match);
+        return NULL;
+    }
+    return match;
+}
+
 static char *normalize_project_arg(char *project) {
     if (!project || (!strchr(project, '/') && !strchr(project, '\\'))) {
         return project;
@@ -1589,17 +1690,28 @@ static char *normalize_project_arg(char *project) {
 
     project = canonicalize_repo_path_if_exists(project);
     char *normalized = cbm_project_name_from_path(project);
+    if (normalized && cbm_validate_project_name(normalized)) {
+        char dir[CBM_SZ_1K];
+        char exact[CBM_SZ_2K];
+        cache_dir(dir, sizeof(dir));
+        snprintf(exact, sizeof(exact), "%s/%s.db", dir, normalized);
+        if (cbm_file_exists(exact)) {
+            free(project);
+            return normalized;
+        }
+    }
+    char *indexed_name = project_name_from_indexed_root(project);
+    if (indexed_name) {
+        free(normalized);
+        free(project);
+        return indexed_name;
+    }
     if (normalized) {
         free(project);
         return normalized;
     }
     return project;
 }
-
-/* Forward decls — defined below alongside store resolution. */
-static const char *cache_dir(char *buf, size_t bufsz);
-static bool is_project_db_file(const char *name, size_t len);
-bool cbm_validate_project_name(const char *project);
 
 /* #1025: agents naturally pass the repo FOLDER name ("codebase-memory-mcp"),
  * but indexed project names derive from the full path
@@ -2643,16 +2755,32 @@ static char *build_project_list_error(const char *reason) {
     enum { ERR_BUF_SZ = 5120 };
     char buf[ERR_BUF_SZ];
     if (count > 0) {
+#ifdef CBM_CODEGRAPH_LIGHT
+        snprintf(buf, sizeof(buf),
+                 "{\"error\":\"%s\",\"hint\":\"Call projects to inspect indexed roots, then "
+                 "pass either its project ID or the repository's absolute path as the "
+                 "\\\"project\\\" argument. Call index with an absolute repo_path if it is not "
+                 "listed.\",\"available_projects\":[%s],\"count\":%d}",
+                 reason, projects, count);
+#else
         snprintf(buf, sizeof(buf),
                  "{\"error\":\"%s\",\"hint\":\"Use list_projects to see all indexed projects, "
                  "then pass it as the \\\"project\\\" "
                  "argument.\",\"available_projects\":[%s],\"count\":%d}",
                  reason, projects, count);
+#endif
     } else {
+#ifdef CBM_CODEGRAPH_LIGHT
+        snprintf(buf, sizeof(buf),
+                 "{\"error\":\"%s\",\"hint\":\"No projects indexed yet. Call index with the "
+                 "repository's absolute repo_path.\"}",
+                 reason);
+#else
         snprintf(buf, sizeof(buf),
                  "{\"error\":\"%s\",\"hint\":\"No projects indexed yet. "
                  "Call index_repository first.\"}",
                  reason);
+#endif
     }
     return heap_strdup(buf);
 }
@@ -2661,10 +2789,16 @@ static char *build_project_list_error(const char *reason) {
  * entirely (no recognized key). Name the literal "project" key so the fix is
  * obvious (#640). Caller must free() result. */
 static char *build_missing_project_error(void) {
+#ifdef CBM_CODEGRAPH_LIGHT
+    return heap_strdup("{\"error\":\"missing required argument: project\",\"hint\":\"Pass "
+                       "either a project ID from projects or an absolute repository path as the "
+                       "\\\"project\\\" argument.\"}");
+#else
     return heap_strdup("{\"error\":\"missing required argument: project\",\"hint\":\"Pass "
                        "the project as the \\\"project\\\" argument, e.g. "
                        "{\\\"project\\\":\\\"<name from list_projects>\\\"}. Run "
                        "list_projects to see indexed projects.\"}");
+#endif
 }
 
 /* Pick the right no-store error: a NULL project means the argument was missing

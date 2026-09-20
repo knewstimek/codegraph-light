@@ -1902,9 +1902,9 @@ TEST(server_handle_tools_list) {
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":2"));
-    static const char *const tools[] = {"index", "search", "trace", "source",
-                                        "overview", "schema", "query"};
-    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    static const char *const tools[] = {"index",    "projects", "search", "trace",
+                                        "source",   "overview", "schema", "query"};
+    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
     /* Keep a tokenizer-neutral wire-size guard in the native suite. Release CI
      * performs the model-tokenizer check against the same response. */
     ASSERT_TRUE(strlen(resp) < 5000U);
@@ -1927,8 +1927,9 @@ TEST(server_handle_tools_list_defaults_to_light_surface) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":200"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "index"));
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "projects"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "query"));
     ASSERT_FALSE(mcp_response_has_exact_tool(resp, "manage_adr"));
     free(resp);
@@ -1938,7 +1939,7 @@ TEST(server_handle_tools_list_defaults_to_light_surface) {
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
-    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -1973,6 +1974,14 @@ TEST(server_handle_light_aliases_dispatch_and_legacy_names_are_hidden) {
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":208,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"projects\",\"arguments\":{}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "unknown tool"));
+    ASSERT_NULL(strstr(resp, "not available in the default tool profile"));
+    free(resp);
+
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -1992,7 +2001,7 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":220,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     static const char *const analysis_tools[] = {
-        "search", "query", "trace", "source", "schema", "overview",
+        "search", "query", "trace", "source", "schema", "overview", "projects",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -8194,6 +8203,17 @@ TEST(tool_project_arg_resolves_unique_tail_issue1025) {
                             "\"name_pattern\":\".*target.*\"}");
     ASSERT_NOT_NULL(r);
     ASSERT_NULL(strstr(r, "project not found"));
+    free(r);
+
+    /* 4. The repository path resolves the stored root even when indexing used
+     * a custom project name. This is the cross-session UX path: callers know
+     * the repository they need, not the name another session chose. */
+    snprintf(args, sizeof(args),
+             "{\"project\":\"%s\",\"name_pattern\":\".*target.*\"}", repo_a);
+    r = cbm_mcp_handle_tool(srv, "search_graph", args);
+    ASSERT_NOT_NULL(r);
+    ASSERT_NULL(strstr(r, "project not found"));
+    ASSERT_NOT_NULL(strstr(r, "unique_tail_target"));
     free(r);
 
     cbm_mcp_server_free(srv);

@@ -13,11 +13,12 @@ The project is designed around three constraints:
 
 ## Tools
 
-The default profile exposes seven tools:
+The default profile exposes eight tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `index` | Build or refresh a repository graph. |
+| `index` | Build or refresh any repository graph; use an absolute path outside the current session root. |
+| `projects` | List indexed graphs and their repository roots, including graphs shared by other sessions. |
 | `search` | Find code symbols by name, kind, or path. |
 | `trace` | Find callers, callees, and call paths. |
 | `source` | Return source code for a graph symbol. |
@@ -31,9 +32,9 @@ The default profile exposes seven tools:
 
 | Profile | Tools |
 | --- | --- |
-| `default` | All seven tools |
+| `default` | All eight tools |
 | `minimal` | `index`, `search`, `trace`, `source` |
-| `analysis` | `search`, `trace`, `source`, `overview`, `schema`, `query` |
+| `analysis` | `projects`, `search`, `trace`, `source`, `overview`, `schema`, `query` |
 
 Example MCP configuration:
 
@@ -80,8 +81,8 @@ python tests/light_mcp_smoke.py --functional build/c/codegraph-light
 
 Installing the optional `tiktoken` package and adding `--require-tokenizer`
 also verifies the 2,000-token budget against `cl100k_base` and `o200k_base`.
-The default profile currently measures 691 tokens or fewer with those two
-encodings. CI repeats the build and functional smoke test on Windows and Linux.
+CI repeats the build, schema-budget check, and functional smoke test on Windows
+and Linux.
 
 The inherited package wrappers under `pkg/` remain sync references only. They
 still describe the upstream distribution and must not be used to publish
