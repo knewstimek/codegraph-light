@@ -2157,6 +2157,14 @@ static const char *project_db_path(const char *project, char *buf, size_t bufsz)
 static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
                                      cbm_store_t **out_store);
 
+static bool published_index_exists(const char *project) {
+    char path[CBM_SZ_1K];
+    char internal[MCP_FIELD_SIZE];
+    project_db_path(project, path, sizeof(path));
+    return path[0] && db_internal_project_name(path, internal, sizeof(internal), NULL) &&
+           strcmp(internal, project) == 0;
+}
+
 /* #704 fallback: scan the cache dir for the db whose sole internal project name
  * equals `project`, returning an open store handle (caller owns it) or NULL.
  * Used only when <project>.db is absent or its internal name differs from the
@@ -10394,6 +10402,56 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
     return true;
 }
 
+/* Every failed index gets a durable, owner-private diagnostic record. Unlike
+ * coverage logs this is written even when no source file reached extraction,
+ * so first-index discovery/manifest failures remain actionable. */
+static bool write_index_failure_logfile(const char *project, const char *stage, const char *reason,
+                                        const char *failure_path, const char *status,
+                                        bool previous_index_exists, char *out_path,
+                                        size_t out_path_size, char *run_id, size_t run_id_size) {
+    const char *cache = cbm_resolve_cache_dir();
+    if (!cache || !out_path || out_path_size == 0 || !run_id || run_id_size == 0) {
+        return false;
+    }
+    char logdir[CBM_SZ_1K];
+    char path[CBM_SZ_1K];
+    int dir_n = snprintf(logdir, sizeof(logdir), "%s/logs", cache);
+    int path_n =
+        snprintf(path, sizeof(path), "%s/%s-failure-XXXXXX", logdir, project ? project : "index");
+    if (dir_n <= 0 || dir_n >= (int)sizeof(logdir) || path_n <= 0 || path_n >= (int)sizeof(path) ||
+        !cbm_mkdir_p_ex(logdir, 0700, CBM_MKDIR_FOLLOW_OWNED)) {
+        return false;
+    }
+    int descriptor = cbm_mkstemp(path);
+    if (descriptor < 0) {
+        return false;
+    }
+    FILE *stream = mcp_fdopen(descriptor, "wb");
+    if (!stream) {
+        (void)mcp_close(descriptor);
+        (void)cbm_unlink(path);
+        return false;
+    }
+    int write_rc =
+        fprintf(stream,
+                "# codegraph-light failed index run\n"
+                "project=%s\nstatus=%s\nprevious_index_exists=%s\n"
+                "failure_stage=%s\nreason=%s\npath=%s\n",
+                project ? project : "", status ? status : "error",
+                previous_index_exists ? "true" : "false", stage ? stage : "pipeline",
+                reason ? reason : "prepublication_abort", failure_path ? failure_path : "");
+    bool closed = fclose(stream) == 0;
+    if (write_rc < 0 || !closed) {
+        (void)cbm_unlink(path);
+        return false;
+    }
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    (void)snprintf(out_path, out_path_size, "%s", path);
+    (void)snprintf(run_id, run_id_size, "%s", base);
+    return true;
+}
+
 /* Build the success portion of the index_repository response.
  * Returns true when status should be "degraded" (#334 plausibility gate). */
 static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *doc,
@@ -11256,6 +11314,11 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     /* Bootstrap from artifact if no local DB exists */
     try_artifact_bootstrap(project_name, repo_path);
 
+    /* Capture this after artifact bootstrap but before the staging run. A
+     * failed first publication must not claim that an old graph survived, and
+     * an artifact-backed generation that really is serving must count. */
+    bool previous_index_existed = published_index_exists(project_name);
+
     /* Close cached store — pipeline will delete + recreate the .db file */
     if (srv->owns_store && srv->store) {
         cbm_store_close(srv->store);
@@ -11302,6 +11365,34 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_doc_set_root(doc, root);
 
     yyjson_mut_obj_add_str(doc, root, "project", project_name);
+
+    if (rc != 0) {
+        const char *failure_stage = cbm_pipeline_failure_stage();
+        const char *failure_reason = cbm_pipeline_failure_reason();
+        const char *failure_path = cbm_pipeline_failure_path();
+        char failure_log[CBM_SZ_1K] = {0};
+        char run_id[MCP_FIELD_SIZE] = {0};
+        const char *failure_status =
+            rc == CBM_PIPELINE_ABORT_PRESERVE_DB
+                ? (previous_index_existed ? "aborted_previous_preserved"
+                                          : "aborted_no_previous_index")
+                : (rc == CBM_PIPELINE_PERSIST_FAILED ? "persist_failed" : "error");
+        bool has_failure_log = write_index_failure_logfile(
+            project_name, failure_stage, failure_reason, failure_path, failure_status,
+            previous_index_existed, failure_log, sizeof(failure_log), run_id, sizeof(run_id));
+        yyjson_mut_obj_add_bool(doc, root, "previous_index_exists", previous_index_existed);
+        yyjson_mut_obj_add_str(doc, root, "failure_stage",
+                               failure_stage ? failure_stage : "pipeline");
+        yyjson_mut_obj_add_str(doc, root, "failure_reason",
+                               failure_reason ? failure_reason : "prepublication_abort");
+        if (failure_path && failure_path[0]) {
+            yyjson_mut_obj_add_strcpy(doc, root, "failure_path", failure_path);
+        }
+        if (has_failure_log) {
+            yyjson_mut_obj_add_strcpy(doc, root, "run_id", run_id);
+            yyjson_mut_obj_add_strcpy(doc, root, "logfile", failure_log);
+        }
+    }
 
     if (rc == 0) {
         /* Write the per-run logfile ONLY when there were skips (no logfile on a
@@ -11371,12 +11462,21 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
          * discovery/manifest phase failed transiently) and the previous index
          * is intact. A 99-test cascade on the Windows leg traced back to
          * exactly this — the response said error, but not which kind. */
-        yyjson_mut_obj_add_str(doc, root, "status", "aborted_previous_preserved");
-        yyjson_mut_obj_add_str(doc, root, "hint",
-                               "Indexing aborted before publication; the previous index is "
-                               "intact and still serving. Causes: files changed while the run "
-                               "was in flight, or a discovery/manifest phase failed "
-                               "transiently. Retry; if it repeats, check the run log.");
+        yyjson_mut_obj_add_str(doc, root, "status",
+                               previous_index_existed ? "aborted_previous_preserved"
+                                                      : "aborted_no_previous_index");
+        yyjson_mut_obj_add_str(doc, root, "reason",
+                               cbm_pipeline_failure_reason() ? cbm_pipeline_failure_reason()
+                                                             : "prepublication_abort");
+        yyjson_mut_obj_add_str(
+            doc, root, "hint",
+            previous_index_existed
+                ? "Indexing aborted before publication; the previous index is intact and still "
+                  "serving. Inspect failure_stage, reason, failure_path, and logfile before "
+                  "retrying."
+                : "Indexing aborted before the first publication; no previous index exists. "
+                  "Inspect failure_stage, reason, failure_path, and logfile, correct the cause, "
+                  "then retry the same index request.");
     } else if (rc == CBM_PIPELINE_PERSIST_FAILED) {
         yyjson_mut_obj_add_str(doc, root, "status", "persist_failed");
         yyjson_mut_obj_add_str(doc, root, "hint",

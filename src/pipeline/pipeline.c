@@ -2443,6 +2443,8 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_hash_t *bas
     if (!cbm_pipeline_semantic_manifests_equal(baseline_manifest, baseline_count, manifest,
                                                manifest_count)) {
         cbm_log_warn("pipeline.abort", "reason", "semantic_inputs_changed");
+        cbm_pipeline_failure_diagnostic_set("semantic_manifest", "semantic_inputs_changed",
+                                            p->repo_path);
         cbm_pipeline_free_semantic_manifest(manifest, manifest_count);
         free(db_dir);
         free(db_path);
@@ -2679,6 +2681,8 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
      * Refresh once here, then use this exact snapshot for both Branch graph
      * construction and the baseline semantic manifest. */
     if (pipeline_refresh_git_context(p) != 0) {
+        cbm_pipeline_failure_diagnostic_set("git_context", "repository_metadata_unavailable",
+                                            p->repo_path);
         return CBM_NOT_FOUND;
     }
 
@@ -2718,6 +2722,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
                               &p->ignored_total);
     if (rc != 0) {
         cbm_log_error("pipeline.err", "phase", "discover", "rc", itoa_buf(rc));
+        cbm_pipeline_failure_diagnostic_set("discovery", "discovery_failed", p->repo_path);
     }
     CBM_PROF_END_N("pipeline", "1_discover", t_discover, file_count);
     cbm_log_info("pipeline.discover", "files", itoa_buf(file_count), "elapsed_ms",
@@ -2738,6 +2743,10 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
                                                     &p->git_ctx, p->userconfig, &baseline_manifest,
                                                     &baseline_count);
     if (rc != 0) {
+        if (!cbm_pipeline_failure_reason()) {
+            cbm_pipeline_failure_diagnostic_set("semantic_manifest", "manifest_build_failed",
+                                                p->repo_path);
+        }
         rc = CBM_PIPELINE_ABORT_PRESERVE_DB;
         goto cleanup;
     }
@@ -3324,6 +3333,7 @@ static void sweep_orphan_stages(const char *final_path) {
 }
 
 int cbm_pipeline_run(cbm_pipeline_t *p) {
+    cbm_pipeline_failure_diagnostic_reset();
     /* Per-index attribution: peaks and phase totals are about THIS index, not
      * the process history, so they start clean here. The first mark opens
      * the labelled path; every pass.timing site below closes a phase. */

@@ -73,6 +73,15 @@ void cbm_pipeline_free(cbm_pipeline_t *p);
 #define CBM_PIPELINE_ABORT_OVER_BUDGET (-5)
 int cbm_pipeline_run(cbm_pipeline_t *p);
 
+/* Diagnostics for the most recent run on the current thread. Non-NULL values
+ * identify the stage, machine-readable reason, and optional path behind a
+ * pre-publication abort. Borrowed until the next run on that thread. */
+void cbm_pipeline_failure_diagnostic_reset(void);
+void cbm_pipeline_failure_diagnostic_set(const char *stage, const char *reason, const char *path);
+const char *cbm_pipeline_failure_stage(void);
+const char *cbm_pipeline_failure_reason(void);
+const char *cbm_pipeline_failure_path(void);
+
 /* Request cancellation of a running pipeline (thread-safe). */
 void cbm_pipeline_cancel(cbm_pipeline_t *p);
 

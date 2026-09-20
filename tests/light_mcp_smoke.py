@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -98,6 +99,17 @@ def inspect_graph_roundtrip(binary: Path) -> None:
             "    return add(value, value)\n",
             encoding="utf-8",
         )
+        reserved_cleanup: str | None = None
+        if sys.platform == "win32":
+            # A repository copied from another platform can contain a real
+            # zero-byte `nul` file through the Win32 extended-length namespace.
+            # It is neither source nor a semantic control and must not abort a
+            # first index while the manifest walker probes metadata.
+            reserved_cleanup = "\\\\?\\" + str(fixture.resolve()) + "\\nul"
+            with open(reserved_cleanup, "wb"):
+                pass
+        else:
+            (fixture / "nul").write_bytes(b"")
         project = fixture.name
         proc = subprocess.Popen(
             [str(binary)],
@@ -201,6 +213,117 @@ def inspect_graph_roundtrip(binary: Path) -> None:
             except subprocess.TimeoutExpired:
                 proc.terminate()
                 proc.wait(timeout=10)
+            if reserved_cleanup is not None:
+                os.unlink(reserved_cleanup)
+
+
+def inspect_first_index_failure_diagnostics(binary: Path) -> None:
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    with tempfile.TemporaryDirectory(prefix="codegraph-light-failure-") as directory:
+        fixture = Path(directory)
+        (fixture / "main.py").write_text("def ready():\n    return True\n", encoding="utf-8")
+        control = fixture / ".gitignore"
+        control.write_text("*.tmp\n", encoding="utf-8")
+
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        close_handle = ctypes.windll.kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        handle = create_file(str(control), 0x80000000, 0, None, 3, 0x80, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise OSError("CreateFileW could not lock the failure fixture")
+
+        proc = subprocess.Popen(
+            [str(binary)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        try:
+            request(
+                proc,
+                20,
+                "initialize",
+                {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "failure-smoke", "version": "1"},
+                },
+            )
+            failed = request(
+                proc,
+                21,
+                "tools/call",
+                {"name": "index", "arguments": {"repo_path": str(fixture)}},
+            ).get("result", {})
+            detail = failed.get("structuredContent", {})
+            if not failed.get("isError") or detail.get("status") != "aborted_no_previous_index":
+                raise AssertionError(f"first-index failure status is not truthful: {failed!r}")
+            required = ("failure_stage", "failure_reason", "failure_path", "run_id", "logfile")
+            missing = [key for key in required if not detail.get(key)]
+            if missing or detail.get("previous_index_exists") is not False:
+                raise AssertionError(f"first-index diagnostics incomplete ({missing}): {detail!r}")
+            logfile = Path(detail["logfile"])
+            if not logfile.is_file() or detail["run_id"] != logfile.name:
+                raise AssertionError(f"failure logfile is not discoverable: {detail!r}")
+
+            close_handle(handle)
+            handle = None
+            assert_call_ok(
+                request(
+                    proc,
+                    22,
+                    "tools/call",
+                    {"name": "index", "arguments": {"repo_path": str(fixture)}},
+                ),
+                "index retry",
+            )
+
+            handle = create_file(str(control), 0x80000000, 0, None, 3, 0x80, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise OSError("CreateFileW could not re-lock the failure fixture")
+            preserved = request(
+                proc,
+                23,
+                "tools/call",
+                {"name": "index", "arguments": {"repo_path": str(fixture)}},
+            ).get("result", {})
+            preserved_detail = preserved.get("structuredContent", {})
+            if (
+                not preserved.get("isError")
+                or preserved_detail.get("status") != "aborted_previous_preserved"
+                or preserved_detail.get("previous_index_exists") is not True
+            ):
+                raise AssertionError(f"published-index failure status is not truthful: {preserved!r}")
+            close_handle(handle)
+            handle = None
+        finally:
+            if handle is not None:
+                close_handle(handle)
+            if proc.stdin:
+                proc.stdin.close()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                proc.wait(timeout=10)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
@@ -226,6 +349,7 @@ def main() -> int:
     sizes = {profile: inspect_profile(binary, profile, encodings) for profile in PROFILES}
     if args.functional:
         inspect_graph_roundtrip(binary)
+        inspect_first_index_failure_diagnostics(binary)
     rendered = ", ".join(
         f"{profile}={size}B" + (f"/{max(tokens)}tok" if tokens else "")
         for profile, (size, tokens) in sizes.items()

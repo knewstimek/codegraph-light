@@ -44,6 +44,37 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #define CBM_NS_PER_MS 1000000.0
 #define CBM_NS_PER_SEC 1000000000LL
 
+static CBM_TLS char g_pipeline_failure_stage[CBM_SZ_64];
+static CBM_TLS char g_pipeline_failure_reason[CBM_SZ_128];
+static CBM_TLS char g_pipeline_failure_path[CBM_SZ_4K];
+
+void cbm_pipeline_failure_diagnostic_reset(void) {
+    g_pipeline_failure_stage[0] = '\0';
+    g_pipeline_failure_reason[0] = '\0';
+    g_pipeline_failure_path[0] = '\0';
+}
+
+void cbm_pipeline_failure_diagnostic_set(const char *stage, const char *reason, const char *path) {
+    (void)snprintf(g_pipeline_failure_stage, sizeof(g_pipeline_failure_stage), "%s",
+                   stage ? stage : "pipeline");
+    (void)snprintf(g_pipeline_failure_reason, sizeof(g_pipeline_failure_reason), "%s",
+                   reason ? reason : "prepublication_abort");
+    (void)snprintf(g_pipeline_failure_path, sizeof(g_pipeline_failure_path), "%s",
+                   path ? path : "");
+}
+
+const char *cbm_pipeline_failure_stage(void) {
+    return g_pipeline_failure_stage[0] ? g_pipeline_failure_stage : NULL;
+}
+
+const char *cbm_pipeline_failure_reason(void) {
+    return g_pipeline_failure_reason[0] ? g_pipeline_failure_reason : NULL;
+}
+
+const char *cbm_pipeline_failure_path(void) {
+    return g_pipeline_failure_path[0] ? g_pipeline_failure_path : NULL;
+}
+
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
 /* One-shot fault injection for the parallel incremental result cache. The
  * production build has no hook or branch at this allocation site. */
@@ -272,6 +303,8 @@ static int semantic_manifest_add(semantic_manifest_builder_t *builder, const cha
     int64_t size = 0;
     if (semantic_manifest_hash_file(abs_path, sha, &mtime_ns, &size) != 0) {
         cbm_log_error("semantic_manifest.err", "path", abs_path);
+        cbm_pipeline_failure_diagnostic_set("semantic_manifest", "semantic_input_unreadable",
+                                            abs_path);
         return CBM_NOT_FOUND;
     }
     return semantic_manifest_add_digest(builder, project, rel_path, sha, mtime_ns, size);
@@ -338,6 +371,10 @@ static int semantic_manifest_walk_controls(semantic_manifest_builder_t *builder,
     }
     cbm_dir_t *dir = cbm_opendir(abs_dir);
     if (!dir) {
+        cbm_log_error("semantic_manifest.err", "reason", "control_directory_unreadable", "path",
+                      abs_dir);
+        cbm_pipeline_failure_diagnostic_set("semantic_manifest", "control_directory_unreadable",
+                                            abs_dir);
         return CBM_NOT_FOUND;
     }
     int rc = 0;
@@ -355,11 +392,31 @@ static int semantic_manifest_walk_controls(semantic_manifest_builder_t *builder,
                         : snprintf(rel_path, sizeof(rel_path), "%s", name);
         if (abs_n < 0 || abs_n >= (int)sizeof(abs_path) || rel_n < 0 ||
             rel_n >= (int)sizeof(rel_path)) {
+            cbm_log_error("semantic_manifest.err", "reason", "path_too_long", "path", abs_dir);
+            cbm_pipeline_failure_diagnostic_set("semantic_manifest", "path_too_long", abs_dir);
             rc = CBM_NOT_FOUND;
             break;
         }
+        bool root_control =
+            (!rel_dir || !rel_dir[0]) &&
+            (strcmp(name, ".cbmignore") == 0 || strcmp(name, ".codebase-memory.json") == 0);
+        bool semantic_control = strcmp(name, ".gitignore") == 0 || root_control ||
+                                semantic_manifest_package_control(name);
+        /* A directory entry already tells us whether ordinary entries can
+         * contain controls. Do not stat unrelated files: on Windows a real
+         * file named NUL/CON can be present through an extended-length path,
+         * but opening that spelling through normal Win32 APIs addresses the
+         * device and fails. Such a non-source, non-control file must not abort
+         * the whole manifest (discovery already ignored it). */
+        if (!entry->is_dir && !semantic_control) {
+            continue;
+        }
         cbm_path_info_t path_info;
         if (cbm_path_info_utf8(abs_path, &path_info) != 0) {
+            cbm_log_error("semantic_manifest.err", "reason", "path_metadata_unreadable", "path",
+                          abs_path);
+            cbm_pipeline_failure_diagnostic_set("semantic_manifest", "path_metadata_unreadable",
+                                                abs_path);
             rc = CBM_NOT_FOUND;
             break;
         }
@@ -375,11 +432,7 @@ static int semantic_manifest_walk_controls(semantic_manifest_builder_t *builder,
                                                  excluded_dirs, excluded_count);
             continue;
         }
-        bool root_control =
-            (!rel_dir || !rel_dir[0]) &&
-            (strcmp(name, ".cbmignore") == 0 || strcmp(name, ".codebase-memory.json") == 0);
-        if (path_info.is_regular && (strcmp(name, ".gitignore") == 0 || root_control ||
-                                     semantic_manifest_package_control(name))) {
+        if (path_info.is_regular && semantic_control) {
             rc = semantic_manifest_add(builder, project, rel_path, abs_path);
         }
     }
@@ -511,6 +564,8 @@ int cbm_pipeline_build_semantic_manifest(const char *project, const char *repo_p
                 }
                 if (rcs[i] != 0) {
                     cbm_log_error("semantic_manifest.err", "path", files[i].path);
+                    cbm_pipeline_failure_diagnostic_set("semantic_manifest",
+                                                        "semantic_input_unreadable", files[i].path);
                     rc = CBM_NOT_FOUND;
                     break;
                 }
@@ -562,6 +617,10 @@ int cbm_pipeline_build_semantic_manifest(const char *project, const char *repo_p
         }
     }
     if (rc != 0) {
+        if (!cbm_pipeline_failure_reason()) {
+            cbm_pipeline_failure_diagnostic_set("semantic_manifest", "manifest_build_failed",
+                                                repo_path);
+        }
         cbm_ht_free(builder.seen_paths);
         cbm_pipeline_free_semantic_manifest(builder.items, builder.count);
         return rc;
@@ -632,6 +691,12 @@ int cbm_pipeline_build_fresh_semantic_manifest(const char *project, const char *
     cbm_git_context_t fresh_git_ctx = {0};
     const cbm_userconfig_t *previous_userconfig = cbm_get_user_lang_config();
     int rc = fresh_userconfig ? cbm_git_context_resolve(repo_path, &fresh_git_ctx) : CBM_NOT_FOUND;
+    if (!fresh_userconfig) {
+        cbm_pipeline_failure_diagnostic_set("user_config", "configuration_unavailable", repo_path);
+    } else if (rc != 0) {
+        cbm_pipeline_failure_diagnostic_set("git_context", "repository_metadata_unavailable",
+                                            repo_path);
+    }
     if (rc == 0) {
         cbm_set_user_lang_config(fresh_userconfig);
         rc = cbm_discover_ex2(repo_path, &opts, &fresh_files, &fresh_file_count, &fresh_excluded,
@@ -642,6 +707,10 @@ int cbm_pipeline_build_fresh_semantic_manifest(const char *project, const char *
         rc = cbm_pipeline_build_semantic_manifest(project, repo_path, fresh_files, fresh_file_count,
                                                   fresh_excluded, fresh_excluded_count,
                                                   &fresh_git_ctx, fresh_userconfig, out, out_count);
+    }
+    if (rc != 0 && !cbm_pipeline_failure_reason()) {
+        cbm_pipeline_failure_diagnostic_set("semantic_manifest", "manifest_build_failed",
+                                            repo_path);
     }
     cbm_set_user_lang_config(previous_userconfig);
     cbm_git_context_free(&fresh_git_ctx);
@@ -2863,6 +2932,10 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     if (manifest_rc != 0 || !cbm_pipeline_semantic_manifests_equal(
                                 baseline_manifest, baseline_count, manifest, manifest_count)) {
         cbm_log_warn("incremental.abort", "reason", "semantic_inputs_changed");
+        if (manifest_rc == 0) {
+            cbm_pipeline_failure_diagnostic_set("semantic_manifest", "semantic_inputs_changed",
+                                                cbm_pipeline_repo_path(p));
+        }
         cbm_pipeline_free_semantic_manifest(manifest, manifest_count);
         free(cov);
         cbm_store_free_coverage(old_cov, old_cov_count);
