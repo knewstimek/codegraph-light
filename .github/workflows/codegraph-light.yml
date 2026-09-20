@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -34,12 +34,23 @@ jobs:
             mingw-w64-clang-x86_64-zlib
             make
 
+      - name: Prepare secure Windows runtime directories
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $paths = @('C:\codegraph-light-ci-cache', 'C:\codegraph-light-ci-runtime')
+          foreach ($path in $paths) {
+            New-Item -ItemType Directory -Force -Path $path | Out-Null
+            icacls $path /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F'
+          }
+
       - name: Build and smoke (Linux)
         if: runner.os == 'Linux'
         env:
           CBM_CACHE_DIR: ${{ runner.temp }}/codegraph-light-cache
           CBM_RUNTIME_DIR: ${{ runner.temp }}/codegraph-light-runtime
         run: |
+          install -d -m 700 "$CBM_CACHE_DIR" "$CBM_RUNTIME_DIR"
           python3 -m pip install --user tiktoken
           make -j2 -f Makefile.cbm cbm SANITIZE= CC=gcc CXX=g++
           python3 tests/light_mcp_smoke.py --require-tokenizer --functional build/c/codegraph-light
@@ -48,8 +59,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         env:
-          CBM_CACHE_DIR: ${{ runner.temp }}/codegraph-light-cache
-          CBM_RUNTIME_DIR: ${{ runner.temp }}/codegraph-light-runtime
+          CBM_CACHE_DIR: C:/codegraph-light-ci-cache
+          CBM_RUNTIME_DIR: C:/codegraph-light-ci-runtime
         run: |
           python -m pip install tiktoken
           make -j2 -f Makefile.cbm cbm SANITIZE= CC=clang CXX=clang++ CXX_STDLIB=-lc++
