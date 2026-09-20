@@ -124,6 +124,13 @@ def inspect_graph_roundtrip(binary: Path) -> None:
             "    return add(value, value)\n",
             encoding="utf-8",
         )
+        # Keep functional CI on the real parallel extraction path (>50 files).
+        # This guards worker-only races that a one-file MCP fixture cannot see.
+        for index in range(64):
+            (fixture / f"worker_{index:02d}.go").write_text(
+                f"package worker{index:02d}\n\nfunc Value{index:02d}() int {{ return {index} }}\n",
+                encoding="utf-8",
+            )
         reserved_cleanup: str | None = None
         if sys.platform == "win32":
             # A repository copied from another platform can contain a real

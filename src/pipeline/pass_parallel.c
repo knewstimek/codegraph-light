@@ -832,8 +832,10 @@ static void pp_spill_enter(extract_ctx_t *ec, const char *reason) {
 }
 
 static bool pp_spill_active(const extract_ctx_t *ec) {
-    return ec->pctx && ec->pctx->spill &&
-           atomic_load_explicit(&ec->pctx->spill_mode, memory_order_acquire) != 0;
+    /* spill_mode is release-stored only after spill is published. Acquire it
+     * before reading the pointer so workers cannot race with publication. */
+    return ec->pctx && atomic_load_explicit(&ec->pctx->spill_mode, memory_order_acquire) != 0 &&
+           ec->pctx->spill;
 }
 
 CBMFileResult *cbm_pipeline_result_acquire(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,

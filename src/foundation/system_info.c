@@ -16,8 +16,9 @@ enum { DEFAULT_CORES = 1, MIN_WORKERS = 1, CBM_WORKERS_MAX = 256 };
 #include "foundation/log.h"
 #include "foundation/platform.h"
 #include "foundation/system_info_internal.h"
-#include <stdint.h> // uint64_t
-#include <stdlib.h> // strtol
+#include <stdatomic.h> // system-info cache publication across worker threads
+#include <stdint.h>    // uint64_t
+#include <stdlib.h>    // strtol
 #include <string.h>
 
 #ifdef _WIN32
@@ -262,23 +263,34 @@ static cbm_system_info_t detect_system_windows(void) {
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-static int info_cached = 0;
+enum { INFO_EMPTY = 0, INFO_CLAIMED = 1, INFO_READY = 2 };
+static _Atomic int info_state = INFO_EMPTY;
 static cbm_system_info_t cached_info;
 
-cbm_system_info_t cbm_system_info(void) {
-    if (!info_cached) {
+static cbm_system_info_t detect_system_now(void) {
 #ifdef _WIN32
-        cached_info = detect_system_windows();
+    return detect_system_windows();
 #elif defined(__APPLE__)
-        cached_info = detect_system_macos();
+    return detect_system_macos();
 #elif defined(__NetBSD__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-        cached_info = detect_system_bsd();
+    return detect_system_bsd();
 #else
-        cached_info = detect_system_linux();
+    return detect_system_linux();
 #endif
-        info_cached = SKIP_ONE;
+}
+
+cbm_system_info_t cbm_system_info(void) {
+    if (atomic_load_explicit(&info_state, memory_order_acquire) == INFO_READY) {
+        return cached_info;
     }
-    return cached_info;
+    cbm_system_info_t local = detect_system_now();
+    int expected = INFO_EMPTY;
+    if (atomic_compare_exchange_strong_explicit(&info_state, &expected, INFO_CLAIMED,
+                                                memory_order_acq_rel, memory_order_relaxed)) {
+        cached_info = local;
+        atomic_store_explicit(&info_state, INFO_READY, memory_order_release);
+    }
+    return local;
 }
 
 int cbm_default_worker_count(bool initial) {
