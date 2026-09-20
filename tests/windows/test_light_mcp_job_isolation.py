@@ -207,10 +207,14 @@ def main() -> int:
     if sys.platform != "win32":
         print("SKIP: Windows-only job isolation regression")
         return 0
-    if len(sys.argv) != 2:
-        print("usage: test_light_mcp_job_isolation.py <codegraph-light.exe>")
+    if len(sys.argv) not in {2, 3} or (len(sys.argv) == 3 and sys.argv[2] != "--crash-seam"):
+        print(
+            "usage: test_light_mcp_job_isolation.py "
+            "<codegraph-light.exe> [--crash-seam]"
+        )
         return 2
     binary = Path(sys.argv[1]).resolve()
+    exercise_crash = len(sys.argv) == 3
     if not binary.is_file():
         print(f"FAIL: binary not found: {binary}")
         return 2
@@ -238,8 +242,9 @@ def main() -> int:
         env = dict(os.environ)
         env["CBM_CACHE_DIR"] = str(cache)
         env["CBM_RUNTIME_DIR"] = str(runtime)
-        env["CBM_INDEX_MAX_RESTARTS"] = "5"
-        env["CBM_TEST_CRASH_ON"] = "synthetic_index_crash.py"
+        if exercise_crash:
+            env["CBM_INDEX_MAX_RESTARTS"] = "5"
+            env["CBM_TEST_CRASH_ON"] = "synthetic_index_crash.py"
         try:
             owner = spawn(binary, repository, env, suspended=True)
             job = create_kill_on_close_job()
@@ -256,35 +261,39 @@ def main() -> int:
                 ),
                 "initial index",
             )
-            (repository / "synthetic_index_crash.py").write_text(
-                "def should_never_publish():\n    return 0\n",
-                encoding="utf-8",
-            )
-            contained_response = request(
-                owner,
-                5,
-                "tools/call",
-                {"name": "index", "arguments": {"repo_path": str(repository)}},
-            )
-            contained_text = tool_text(contained_response)
-            contained_result = contained_response.get("result", {})
-            contained_detail = contained_result.get("structuredContent", {})
-            recovered = (
-                not contained_result.get("isError")
-                and '"status":"indexed"' in contained_text
-                and "synthetic_index_crash.py" in contained_text
-            )
-            structured_failure = (
-                contained_result.get("isError")
-                and contained_detail.get("status")
-                in {"error", "aborted_no_previous_index", "aborted_previous_preserved"}
-            )
-            if not (recovered or structured_failure) or owner.poll() is not None:
-                raise AssertionError(
-                    "index crash did not cross the supervised-worker boundary: "
-                    f"response={contained_text[-2000:]!r}, exit={owner.poll()}"
+            if exercise_crash:
+                (repository / "synthetic_index_crash.py").write_text(
+                    "def should_never_publish():\n    return 0\n",
+                    encoding="utf-8",
                 )
-            assert_ok(request(owner, 6, "tools/list", {}), "post-crash owner tools/list")
+                contained_response = request(
+                    owner,
+                    5,
+                    "tools/call",
+                    {"name": "index", "arguments": {"repo_path": str(repository)}},
+                )
+                contained_text = tool_text(contained_response)
+                contained_result = contained_response.get("result", {})
+                contained_detail = contained_result.get("structuredContent", {})
+                recovered = (
+                    not contained_result.get("isError")
+                    and '"status":"indexed"' in contained_text
+                    and "synthetic_index_crash.py" in contained_text
+                )
+                structured_failure = (
+                    contained_result.get("isError")
+                    and contained_detail.get("status")
+                    in {"error", "aborted_no_previous_index", "aborted_previous_preserved"}
+                )
+                if not (recovered or structured_failure) or owner.poll() is not None:
+                    raise AssertionError(
+                        "index crash did not cross the supervised-worker boundary: "
+                        f"response={contained_text[-2000:]!r}, exit={owner.poll()}"
+                    )
+                tools_label = "post-crash owner tools/list"
+            else:
+                tools_label = "post-index owner tools/list"
+            assert_ok(request(owner, 6, "tools/list", {}), tools_label)
 
             peer = spawn(binary, repository, env)
             initialize(peer, 3)
@@ -320,9 +329,10 @@ def main() -> int:
             ids = sorted(response.get("id") for response in responses)
             if ids != [10, 11, 12, 13] or peer.poll() is not None:
                 raise AssertionError(f"peer did not remain serviceable: ids={ids}, exit={peer.poll()}")
+            detail = "index crash stayed in its worker and " if exercise_crash else ""
             print(
-                "PASS: index crash stayed in its worker and closing one restrictive MCP job "
-                "preserved all four peer trace responses"
+                f"PASS: {detail}closing one restrictive MCP job preserved all four peer "
+                "trace responses"
             )
             return 0
         finally:
