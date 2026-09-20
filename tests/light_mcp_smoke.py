@@ -34,6 +34,31 @@ def request(proc: subprocess.Popen[str], request_id: int, method: str, params: d
             return response
 
 
+def pipelined_requests(proc: subprocess.Popen[str], calls: list[tuple[int, str, dict]]) -> dict[int, dict]:
+    """Send every call before reading, matching Promise.all-style MCP clients."""
+    assert proc.stdin is not None and proc.stdout is not None
+    for request_id, method, params in calls:
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    proc.stdin.flush()
+
+    pending = {request_id for request_id, _, _ in calls}
+    responses: dict[int, dict] = {}
+    while pending:
+        line = proc.stdout.readline()
+        if not line:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise RuntimeError(
+                f"MCP process exited with pipelined responses pending {sorted(pending)}: {stderr[-2000:]}"
+            )
+        response = json.loads(line)
+        response_id = response.get("id")
+        if response_id in pending:
+            responses[response_id] = response
+            pending.remove(response_id)
+    return responses
+
+
 def inspect_profile(binary: Path, profile: str, encodings: list[object]) -> tuple[int, list[int]]:
     args = [str(binary)]
     if profile != "default":
@@ -141,6 +166,16 @@ def inspect_graph_roundtrip(binary: Path) -> None:
             )
             if "add" not in json.dumps(searched, ensure_ascii=False):
                 raise AssertionError(f"search: indexed function was not returned: {searched!r}")
+            parallel = pipelined_requests(
+                proc,
+                [
+                    (120, "tools/call", {"name": "search", "arguments": {"project": project, "query": "add", "limit": 50}}),
+                    (121, "tools/call", {"name": "search", "arguments": {"project": project, "query": "twice", "limit": 50}}),
+                    (122, "tools/call", {"name": "search", "arguments": {"project": project, "query": "math", "limit": 50}}),
+                ],
+            )
+            for request_id, response in parallel.items():
+                assert_call_ok(response, f"parallel search {request_id}")
             assert_call_ok(
                 request(
                     proc,

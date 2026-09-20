@@ -1359,6 +1359,57 @@ TEST(daemon_frontend_idle_uses_one_maintenance_observer) {
     ASSERT_TRUE(fixture_closed);
     PASS();
 }
+
+/* A transient secure-lock observation failure is not positive maintenance
+ * intent. Windows file filters can briefly make one probe indeterminate; the
+ * frontend must retry and keep the MCP transport alive once absence is
+ * observable again. */
+TEST(daemon_frontend_retries_transient_maintenance_observation) {
+    frontend_idle_fixture_t fixture;
+    bool fixture_ready = frontend_idle_fixture_start(&fixture);
+    int input_pipe[2] = {-1, -1};
+    bool pipe_ready = fixture_ready && cbm_pipe(input_pipe) == 0;
+    FILE *input = pipe_ready ? frontend_test_fdopen_read(input_pipe[0]) : NULL;
+    FILE *output = input ? tmpfile() : NULL;
+    frontend_idle_run_t run = {
+        .client = fixture.client,
+        .manager = fixture.maintenance.manager,
+        .input = input,
+        .output = output,
+        .result = -1,
+    };
+    if (output) {
+        fixture.client = NULL;
+    }
+    cbm_daemon_frontend_test_observer_reset(false);
+    cbm_daemon_frontend_test_observer_fail_transiently(3);
+    cbm_thread_t frontend_thread;
+    bool thread_started =
+        output && cbm_thread_create(&frontend_thread, 0, frontend_idle_run, &run) == 0;
+    uint64_t deadline = cbm_now_ms() + 10000U;
+    while (thread_started && cbm_now_ms() < deadline &&
+           cbm_daemon_frontend_test_monitor_observations() < 4) {
+        cbm_usleep(1000);
+    }
+    uint64_t observations = cbm_daemon_frontend_test_monitor_observations();
+    bool input_closed = !pipe_ready || frontend_test_close_fd(input_pipe[1]) == 0;
+    bool joined = thread_started && cbm_thread_join(&frontend_thread) == 0;
+    bool input_stream_closed = !input || fclose(input) == 0;
+    bool output_closed = !output || fclose(output) == 0;
+    bool fixture_closed = frontend_idle_fixture_finish(&fixture);
+
+    ASSERT_TRUE(fixture_ready);
+    ASSERT_TRUE(pipe_ready);
+    ASSERT_TRUE(thread_started);
+    ASSERT_TRUE(observations >= 4);
+    ASSERT_TRUE(input_closed);
+    ASSERT_TRUE(joined);
+    ASSERT_EQ(run.result, 0);
+    ASSERT_TRUE(input_stream_closed);
+    ASSERT_TRUE(output_closed);
+    ASSERT_TRUE(fixture_closed);
+    PASS();
+}
 #endif
 
 #ifndef _WIN32
@@ -1663,6 +1714,7 @@ SUITE(daemon_frontend) {
     RUN_TEST(daemon_frontend_rejects_non_notification_cancellation_shapes);
 #if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
     RUN_TEST(daemon_frontend_idle_uses_one_maintenance_observer);
+    RUN_TEST(daemon_frontend_retries_transient_maintenance_observation);
 #endif
 #ifndef _WIN32
     RUN_TEST(daemon_frontend_maintenance_exits_while_stdio_reader_is_blocked);

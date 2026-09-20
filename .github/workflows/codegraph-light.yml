@@ -65,3 +65,4 @@ jobs:
           python -m pip install tiktoken
           make -j2 -f Makefile.cbm cbm SANITIZE= CC=clang CXX=clang++ CXX_STDLIB=-lc++
           python tests/light_mcp_smoke.py --require-tokenizer --functional build/c/codegraph-light.exe
+          python tests/windows/test_light_mcp_job_isolation.py build/c/codegraph-light.exe

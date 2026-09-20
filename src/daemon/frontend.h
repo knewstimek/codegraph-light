@@ -48,6 +48,7 @@ bool cbm_daemon_maintenance_monitor_stop(cbm_daemon_maintenance_monitor_t **moni
  * these controls nor their counters. */
 void cbm_daemon_frontend_test_observer_reset(bool hold_monitor);
 void cbm_daemon_frontend_test_observer_release(void);
+void cbm_daemon_frontend_test_observer_fail_transiently(unsigned int observations);
 bool cbm_daemon_frontend_test_monitor_waiting(void);
 uint64_t cbm_daemon_frontend_test_monitor_observations(void);
 uint64_t cbm_daemon_frontend_test_worker_observations(void);

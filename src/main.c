@@ -12,9 +12,10 @@
  *   --port=N        Set HTTP UI port (persisted, default 9749)
  *   --tool-profile=default|minimal|analysis  Select the MCP tool surface
  *
- * Long-lived MCP and hook frontends are thin clients of one mandatory
- * per-account daemon. One-shot CLI tool calls run in an isolated local server
- * and never create or retain a daemon generation.
+ * CodeGraph Light runs each stdio MCP frontend as an independent in-process
+ * server. The upstream shared daemon remains available to non-MCP roles, but
+ * is deliberately outside this product's MCP lifetime and compatibility
+ * boundary. One-shot CLI tool calls also use an isolated local server.
  */
 #ifdef _WIN32
 /* winsock2 must precede every project header that can transitively include
@@ -1642,6 +1643,33 @@ static bool main_set_client_context(cbm_daemon_runtime_client_t *client, const c
            CBM_DAEMON_RUNTIME_APPLICATION_OK;
 }
 
+#ifdef CBM_CODEGRAPH_LIGHT
+static int main_run_standalone_mcp(cbm_mcp_tool_profile_t tool_profile) {
+    char root[MAIN_PATH_CAP];
+    char allowed[MAIN_PATH_CAP];
+    const char *allowed_ptr = NULL;
+    if (!main_session_context(NULL, root, allowed, &allowed_ptr)) {
+        (void)fprintf(stderr, "codegraph-light: standalone MCP session context is invalid\n");
+        return EXIT_FAILURE;
+    }
+    cbm_mcp_server_t *server = cbm_mcp_server_new(NULL);
+    if (!server) {
+        (void)fprintf(stderr, "codegraph-light: standalone MCP server could not be created\n");
+        return EXIT_FAILURE;
+    }
+    cbm_mcp_server_set_tool_profile(server, tool_profile);
+    cbm_mcp_server_set_background_tasks(server, false);
+    if (!cbm_mcp_server_set_session_context(server, root, allowed_ptr)) {
+        (void)fprintf(stderr, "codegraph-light: standalone MCP session context was rejected\n");
+        cbm_mcp_server_free(server);
+        return EXIT_FAILURE;
+    }
+    int result = cbm_mcp_server_run(server, stdin, stdout);
+    cbm_mcp_server_free(server);
+    return result < 0 ? EXIT_FAILURE : result;
+}
+#endif
+
 /* Parse a strict MAJOR.MINOR.PATCH triple; false for anything else (dev
  * builds and prereleases never participate in auto-drain decisions). */
 static bool main_semver_triple(const char *text, long out[3]) {
@@ -2945,6 +2973,28 @@ int main(int argc, char **argv) {
         }
         return exit_code;
     }
+
+#ifdef CBM_CODEGRAPH_LIGHT
+    if (role == CBM_DAEMON_PROCESS_MCP_CLIENT) {
+        /* The shared upstream daemon is a poor lifetime boundary for this
+         * small stdio product. In particular, Windows can place the spawning
+         * frontend in a non-breakaway KILL_ON_JOB_CLOSE job; closing that one
+         * frontend then kills the daemon underneath every unrelated session.
+         * Enter the process-local server before executable hashing and daemon
+         * rendezvous so startup is independent of both shared-daemon state and
+         * the size of this monolithic executable. Supervised index workers
+         * retain the publication and crash-containment boundary. */
+        if (!client_start_parent_watchdog(process_initial_ppid)) {
+            (void)fprintf(stderr,
+                          "codegraph-light: standalone parent-death watchdog could not start\n");
+            return EXIT_FAILURE;
+        }
+        setup_signal_handlers();
+        int result = main_run_standalone_mcp(tool_profile);
+        atomic_store(&g_shutdown, 1);
+        return result;
+    }
+#endif
 
     char executable_path[MAIN_PATH_CAP];
     cbm_daemon_build_identity_t identity;

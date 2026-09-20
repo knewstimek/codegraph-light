@@ -4,6 +4,7 @@
 #include "daemon/frontend.h"
 
 #include "daemon/application.h"
+#include "daemon/ipc.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/platform.h"
@@ -16,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum {
     FRONTEND_QUEUE_CAPACITY = 8,
@@ -53,12 +55,20 @@ enum {
      * The 10 ms cadence still paces the monitor's post-detection grace loop,
      * which does no lock probing. */
     FRONTEND_MAINTENANCE_IDLE_POLL_MS = 250,
+    /* A single secure lock probe can fail transiently on Windows while an AV,
+     * backup filter, or another process briefly owns an incompatible file
+     * handle. Treating one indeterminate observation as proof of unsafe state
+     * killed otherwise healthy MCP transports. Genuine maintenance is BUSY
+     * and remains immediate; only IO/UNSAFE must repeat consecutively. */
+    FRONTEND_MAINTENANCE_UNCERTAIN_LIMIT = 4,
     /* The owner thread may be draining a supervised process tree. Preserve the
      * supervisor's complete graceful + forced-settle window before the monitor
      * fail-stops the process, plus scheduling/teardown margin. */
     FRONTEND_MAINTENANCE_GRACE_MS =
         CBM_SUBPROCESS_MAX_CANCEL_GRACE_MS + CBM_SUBPROCESS_FORCE_SETTLE_MS + 1000,
     FRONTEND_PARTICIPANT_NAME_CAP = 64,
+    FRONTEND_DIAGNOSTIC_PATH_CAP = 4096,
+    FRONTEND_DIAGNOSTIC_LOG_CAP = 1024 * 1024,
 };
 
 typedef struct {
@@ -117,13 +127,19 @@ static atomic_bool frontend_test_monitor_is_waiting = ATOMIC_VAR_INIT(false);
 static atomic_uint_fast64_t frontend_test_monitor_observation_count = ATOMIC_VAR_INIT(0);
 static atomic_uint_fast64_t frontend_test_worker_observation_count = ATOMIC_VAR_INIT(0);
 static atomic_uint_fast64_t frontend_test_worker_idle_count = ATOMIC_VAR_INIT(0);
+static atomic_uint frontend_test_transient_failures = ATOMIC_VAR_INIT(0);
 
 void cbm_daemon_frontend_test_observer_reset(bool hold_monitor) {
     atomic_store_explicit(&frontend_test_monitor_observation_count, 0, memory_order_release);
     atomic_store_explicit(&frontend_test_worker_observation_count, 0, memory_order_release);
     atomic_store_explicit(&frontend_test_worker_idle_count, 0, memory_order_release);
+    atomic_store_explicit(&frontend_test_transient_failures, 0, memory_order_release);
     atomic_store_explicit(&frontend_test_monitor_is_waiting, false, memory_order_release);
     atomic_store_explicit(&frontend_test_hold_monitor, hold_monitor, memory_order_release);
+}
+
+void cbm_daemon_frontend_test_observer_fail_transiently(unsigned int observations) {
+    atomic_store_explicit(&frontend_test_transient_failures, observations, memory_order_release);
 }
 
 void cbm_daemon_frontend_test_observer_release(void) {
@@ -160,6 +176,13 @@ static cbm_version_cohort_maintenance_presence_t frontend_observe_maintenance(
             }
             atomic_store_explicit(&frontend_test_monitor_is_waiting, false, memory_order_release);
         }
+        unsigned int failures =
+            atomic_load_explicit(&frontend_test_transient_failures, memory_order_acquire);
+        if (failures > 0) {
+            (void)atomic_fetch_sub_explicit(&frontend_test_transient_failures, 1,
+                                            memory_order_acq_rel);
+            return CBM_VERSION_COHORT_MAINTENANCE_IO;
+        }
     } else {
         atomic_fetch_add_explicit(&frontend_test_worker_observation_count, 1, memory_order_release);
     }
@@ -169,12 +192,51 @@ static cbm_version_cohort_maintenance_presence_t frontend_observe_maintenance(
     return cbm_version_cohort_maintenance_presence_terminal(manager);
 }
 
+static uint64_t frontend_process_id(void) {
+#ifdef _WIN32
+    return (uint64_t)GetCurrentProcessId();
+#else
+    return (uint64_t)getpid();
+#endif
+}
+
+/* This file is deliberately separate from stderr: a coding agent can stop
+ * reading its MCP child's stderr, and several fail-stop paths exist precisely
+ * to escape that backpressure. The record is best-effort, owner-private, and
+ * bounded; it gives the next session a durable reason instead of an
+ * unexplained `Transport closed`. */
+static void frontend_record_exit(const char *participant, const char *reason, int exit_code) {
+    const char *cache = cbm_resolve_cache_dir();
+    char logs[FRONTEND_DIAGNOSTIC_PATH_CAP];
+    if (!cache || !cache[0] || !participant || !reason) {
+        return;
+    }
+    int logs_length = snprintf(logs, sizeof(logs), "%s/logs", cache);
+    if (logs_length <= 0 || (size_t)logs_length >= sizeof(logs)) {
+        return;
+    }
+    FILE *file = cbm_daemon_ipc_private_log_open(logs, "frontend-exits.ndjson",
+                                                  FRONTEND_DIAGNOSTIC_LOG_CAP);
+    if (!file) {
+        return;
+    }
+    (void)fprintf(file,
+                  "{\"event\":\"frontend.exit\",\"timestamp_unix_s\":%lld,"
+                  "\"pid\":%llu,\"participant\":\"%s\",\"reason\":\"%s\","
+                  "\"exit_code\":%d}\n",
+                  (long long)time(NULL), (unsigned long long)frontend_process_id(), participant,
+                  reason, exit_code);
+    (void)fclose(file);
+}
+
 static void *frontend_maintenance_monitor_worker(void *opaque) {
     cbm_daemon_maintenance_monitor_t *monitor = opaque;
+    unsigned int uncertain_observations = 0;
     while (!atomic_load_explicit(&monitor->stopping, memory_order_acquire)) {
         cbm_version_cohort_maintenance_presence_t presence =
             frontend_observe_maintenance(monitor->manager, true);
         if (presence == CBM_VERSION_COHORT_MAINTENANCE_ABSENT) {
+            uncertain_observations = 0;
             cbm_usleep(FRONTEND_MAINTENANCE_IDLE_POLL_MS * 1000U);
             continue;
         }
@@ -191,6 +253,7 @@ static void *frontend_maintenance_monitor_worker(void *opaque) {
              * owner records the maintenance event durably. */
 
             if (monitor->exit_when_cancel_not_needed && !cancel_requested) {
+                frontend_record_exit(monitor->participant, "maintenance_idle", monitor->exit_code);
                 _Exit(monitor->exit_code);
             }
             uint64_t now = cbm_now_ms();
@@ -204,12 +267,22 @@ static void *frontend_maintenance_monitor_worker(void *opaque) {
             if (atomic_load_explicit(&monitor->stopping, memory_order_acquire)) {
                 return NULL;
             }
+            frontend_record_exit(monitor->participant, "maintenance_grace_expired",
+                                 monitor->exit_code);
             _Exit(monitor->exit_code);
         }
 
-        /* An observer that cannot prove absence must not let local work
-         * survive into a binary mutation window. Fail closed and let native
-         * process teardown release SQLite and cohort ownership. */
+        /* IO/UNSAFE is not positive maintenance intent. Retry a short,
+         * consecutive window so transient Windows file-filter/share failures
+         * cannot tear down a healthy transport. Persistent uncertainty still
+         * fails closed and releases SQLite/cohort ownership. */
+        uncertain_observations++;
+        if (uncertain_observations < FRONTEND_MAINTENANCE_UNCERTAIN_LIMIT) {
+            cbm_usleep(FRONTEND_MAINTENANCE_POLL_MS * 1000U);
+            continue;
+        }
+        frontend_record_exit(monitor->participant, "maintenance_observation_indeterminate",
+                             EXIT_FAILURE);
         _Exit(EXIT_FAILURE);
     }
     return NULL;
@@ -318,6 +391,7 @@ static void *frontend_join_watchdog(void *opaque) {
          * fclose/IPC cancellation cannot portably wake its worker on every
          * platform. Fail-stop releases the authenticated connection and lets
          * the daemon cancel this exact session instead of hanging forever. */
+        frontend_record_exit("MCP frontend", "worker_join_timeout", EXIT_FAILURE);
         _Exit(EXIT_FAILURE);
     }
     return NULL;
@@ -532,6 +606,7 @@ static void *frontend_worker(void *opaque) {
                  * daemon session ownership without a detached reader or an
                  * unsafe cross-thread fclose. Logging or flushing here could
                  * itself block on agent-owned stdout/stderr. */
+                frontend_record_exit("MCP frontend", "daemon_transport_failure", EXIT_FAILURE);
                 _Exit(EXIT_FAILURE);
             }
             break;
@@ -661,6 +736,8 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
     cbm_thread_t worker;
     if (cbm_thread_create(&worker, 0, frontend_worker, &state) != 0) {
         if (!cbm_daemon_maintenance_monitor_stop(&maintenance_monitor)) {
+            frontend_record_exit("MCP frontend", "monitor_join_failed_after_worker_start",
+                                 EXIT_FAILURE);
             _Exit(EXIT_FAILURE);
         }
         cbm_mutex_destroy(&state.mutex);
@@ -742,21 +819,25 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
     if (!frontend_worker_is_done(&state)) {
         atomic_init(&watchdog.complete, false);
         if (cbm_thread_create(&watchdog_thread, 0, frontend_join_watchdog, &watchdog) != 0) {
+            frontend_record_exit("MCP frontend", "worker_watchdog_start_failed", EXIT_FAILURE);
             _Exit(EXIT_FAILURE);
         }
         watchdog_started = true;
     }
     if (cbm_thread_join(&worker) != 0) {
         /* Preserve every object the worker may still reference. */
+        frontend_record_exit("MCP frontend", "worker_join_failed", EXIT_FAILURE);
         _Exit(EXIT_FAILURE);
     }
     if (watchdog_started) {
         atomic_store_explicit(&watchdog.complete, true, memory_order_release);
         if (cbm_thread_join(&watchdog_thread) != 0) {
+            frontend_record_exit("MCP frontend", "worker_watchdog_join_failed", EXIT_FAILURE);
             _Exit(EXIT_FAILURE);
         }
     }
     if (!cbm_daemon_maintenance_monitor_stop(&maintenance_monitor)) {
+        frontend_record_exit("MCP frontend", "maintenance_monitor_join_failed", EXIT_FAILURE);
         _Exit(EXIT_FAILURE);
     }
     if (close_begun) {
