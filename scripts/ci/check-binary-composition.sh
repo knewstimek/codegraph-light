@@ -56,6 +56,9 @@ SEAM_NEEDLES=(
     'CBM_TEST_WORKER_DESCENDANT_PID_FILE'
     'CBM_TEST_CRASH_ON'
     'CBM_TEST_HANG_ON'
+    'CBM_TEST_WORKER_EXIT_MARKER'
+    'CBM_TEST_RETRY_UNATTRIBUTABLE'
+    'CBM_TEST_ARTIFACT_FAIL_AT'
 )
 
 # The in-process updater combined network download with replacement of its own

@@ -37,6 +37,7 @@
 #include "cli/cli.h"
 #include "cli/progress_sink.h"
 #include "foundation/constants.h"
+#include "foundation/platform.h"
 
 enum {
     MAIN_MIN_ARGC = 1,
@@ -3061,6 +3062,14 @@ int main(int argc, char **argv) {
         char *worker_repo_path = cbm_mcp_get_string_arg(invocation.args_json, "repo_path");
         cbm_index_worker_log_begin(invocation.args_json, worker_repo_path);
         free(worker_repo_path);
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+        /* Exercise repeated supervisor failures before per-file quarantine can
+         * turn a later retry into a successful, skipped-file index. */
+        const char *exit_marker = getenv("CBM_TEST_WORKER_EXIT_MARKER");
+        if (exit_marker && cbm_file_exists(exit_marker)) {
+            return EXIT_FAILURE;
+        }
+#endif
         cbm_daemon_ipc_endpoint_t *worker_endpoint = cbm_daemon_bootstrap_endpoint_new(NULL);
         cbm_project_lock_manager_t *worker_project_locks =
             worker_endpoint ? cbm_project_lock_manager_new(worker_endpoint) : NULL;

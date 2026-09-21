@@ -13,6 +13,7 @@
 #include "ui/http_server.h"      /* cbm_http_server_resolve_binary_path */
 
 #include <limits.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -568,6 +569,15 @@ static bool worker_unique_file(char *out, size_t out_size, const char *kind) {
     if (!out || out_size == 0 || !kind || !kind[0]) {
         return false;
     }
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+    static _Atomic int artifact_calls = 0;
+    int artifact_call = atomic_fetch_add_explicit(&artifact_calls, 1, memory_order_relaxed) + 1;
+    const char *fail_at = getenv("CBM_TEST_ARTIFACT_FAIL_AT");
+    if (fail_at && atoi(fail_at) == artifact_call) {
+        errno = EACCES;
+        return false;
+    }
+#endif
     char cache_copy[INDEX_WORKER_PATH_CAP] = {0};
     bool have_cache = worker_cache_dir(cache_copy);
     int written;
@@ -705,6 +715,11 @@ int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_
     worker_result_init(&handle->result);
     if (!worker_unique_file(handle->response_path, sizeof(handle->response_path), "response") ||
         !worker_unique_file(handle->log_path, sizeof(handle->log_path), "log")) {
+        int saved_errno = errno;
+        char error_text[CBM_SZ_32];
+        (void)snprintf(error_text, sizeof(error_text), "%d", saved_errno);
+        cbm_log_error("index.supervisor.artifact_create_failed", "artifact",
+                      handle->response_path[0] ? "log" : "response", "errno", error_text);
         (void)cbm_unlink(handle->response_path);
         (void)cbm_unlink(handle->log_path);
         free(handle);
