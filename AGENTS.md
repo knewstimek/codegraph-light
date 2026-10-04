@@ -1,5 +1,7 @@
 # Project working agreements
 
+- For public Git commits, use the GitHub account nickname as both author and committer name and a GitHub noreply email; never use a real name or personal email. Any DCO sign-off must match that identity.
+
 - Before preparing or publishing a release, query RepoPlane for the current memo with topic key `release-procedure-must-be-registered` and follow its latest revision. Do not reconstruct the release procedure from memory when RepoPlane is available.
 - Treat release publication as gated: push the intended commit, require Windows and Linux CI success for that exact SHA, retain the unstripped artifact privately for diagnostics, strip only a copied public candidate, then verify that stripped candidate's embedded `--version`, functional MCP smoke, process-lifetime and concurrency regressions, format/architecture, size, and SHA-256 before creating the matching tag and GitHub release; publish the stripped candidate only when it is smaller and every gate passes.
 - On Windows, keep the versioned release `BUILD_DIR` at the repository root and deliberately short (currently `r`) until the monolithic link is converted to response files. Even `build/r` can exceed the `CreateProcess` command-line limit once version flags are added, appearing as truncated missing paths.
