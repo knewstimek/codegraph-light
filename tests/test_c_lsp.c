@@ -15655,6 +15655,54 @@ TEST(registry_short_name_indexes) {
     PASS();
 }
 
+/* Synthetic duplicate receiver candidates: include provenance, module
+ * boundaries, explicit namespace and insertion order must all be respected. */
+TEST(clsp_duplicate_receiver_include_selection) {
+    for (int reverse = 0; reverse < 2; reverse++) {
+        CBMArena arena;
+        cbm_arena_init(&arena);
+        CBMTypeRegistry reg;
+        cbm_registry_init(&reg, &arena);
+        const char *qns[] = {"test.surface.Surface", "test.mirror.surface.Surface",
+                             "test.surface_extra.Surface", "test.surface.Alpha.Surface",
+                             "test.surface.Beta.Surface"};
+        for (int n = 0; n < 5; n++) {
+            int i = reverse ? 4 - n : n;
+            CBMRegisteredType t = {0};
+            t.qualified_name = qns[i];
+            t.short_name = "Surface";
+            cbm_registry_add_type(&reg, t);
+            CBMRegisteredFunc f = {0};
+            f.qualified_name = cbm_arena_sprintf(&arena, "%s.Lock", qns[i]);
+            f.receiver_type = qns[i];
+            f.short_name = "Lock";
+            cbm_registry_add_func(&reg, f);
+        }
+        cbm_registry_finalize(&reg);
+        CLSPContext ctx;
+        CBMResolvedCallArray out = {0};
+        c_lsp_init(&ctx, &arena, "", 0, &reg, "test.caller", true, &out);
+        ASSERT_NULL(c_lookup_member(&ctx, "test.caller.Surface", "Lock"));
+        c_lsp_add_include(&ctx, "surface.h", "test.surface");
+        const CBMRegisteredFunc *f = c_lookup_member(&ctx, "Alpha.Surface", "Lock");
+        ASSERT_NOT_NULL(f);
+        ASSERT_STR_EQ(f->qualified_name, "test.surface.Alpha.Surface.Lock");
+        f = c_lookup_member(&ctx, "test.caller.Beta.Surface", "Lock");
+        ASSERT_NOT_NULL(f);
+        ASSERT_STR_EQ(f->qualified_name, "test.surface.Beta.Surface.Lock");
+        ASSERT_NULL(c_lookup_member(&ctx, "Gamma.Surface", "Lock"));
+        // Directly declared Surface outranks namespaced homonyms and the
+        // textual-prefix sibling surface_extra.
+        f = c_lookup_member(&ctx, "test.caller.Surface", "Lock");
+        ASSERT_NOT_NULL(f);
+        ASSERT_STR_EQ(f->qualified_name, "test.surface.Surface.Lock");
+        c_lsp_add_include(&ctx, "mirror/surface.h", "test.mirror.surface");
+        ASSERT_NULL(c_lookup_member(&ctx, "test.caller.Surface", "Lock"));
+        cbm_arena_destroy(&arena);
+    }
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 /* C++ sibling guard: the same shared-registry read-only invariant for the
@@ -16364,6 +16412,7 @@ TEST(clsp_preprocessed_destructor_rewrite_respects_origin_during_rewrite) {
 }
 
 SUITE(c_lsp) {
+    RUN_TEST(clsp_duplicate_receiver_include_selection);
     RUN_TEST(clsp_c_reassigned_function_pointer_calls_join_exact_occurrences);
     RUN_TEST(clsp_c_nested_function_pointer_shadow_restores_outer_target);
     RUN_TEST(clsp_cpp_repeated_same_leaf_calls_join_exact_occurrences);
