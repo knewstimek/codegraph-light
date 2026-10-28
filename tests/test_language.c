@@ -1099,6 +1099,44 @@ TEST(lang_ext_gn) {
     PASS();
 }
 
+/* Shared .inc suffix: routing must happen before extraction. */
+static CBMLanguage disambiguate_inc_content(const char *content) {
+    char path[] = "/tmp/cbm_test_language_fragment.inc";
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return CBM_LANG_COUNT;
+    }
+    fputs(content, f);
+    fclose(f);
+    CBMLanguage lang = cbm_disambiguate_inc(path);
+    remove(path);
+    return lang;
+}
+
+TEST(lang_inc_c_family_and_existing_dialects) {
+    ASSERT_EQ(disambiguate_inc_content(
+                  "#include \"api.h\"\nextern \"C\" int sample_export() { return 0; }\n"),
+              CBM_LANG_CPP);
+    ASSERT_EQ(disambiguate_inc_content(
+                  "/* fragment */\n#ifdef ENABLE_SAMPLE\nif (check()) return 1;\n#endif\n"),
+              CBM_LANG_CPP);
+    ASSERT_EQ(disambiguate_inc_content(
+                  "#define SAMPLE_CALLBACK(type) type\nstatic SAMPLE_CALLBACK(int) sample() {}\n"),
+              CBM_LANG_CPP);
+    ASSERT_EQ(disambiguate_inc_content("  # include <stdint.h>\n"), CBM_LANG_CPP);
+    ASSERT_EQ(disambiguate_inc_content("ROUTINE Sample\n#define Value 1\n"),
+              CBM_LANG_OBJECTSCRIPT_ROUTINE);
+    ASSERT_EQ(disambiguate_inc_content("#define Value 1\n"), CBM_LANG_OBJECTSCRIPT_ROUTINE);
+    ASSERT_EQ(disambiguate_inc_content("#def1arg Value(%x) %x\n"), CBM_LANG_OBJECTSCRIPT_ROUTINE);
+    ASSERT_EQ(
+        disambiguate_inc_content("# recipe comment\nSUMMARY = \"sample\"\nrequire base.inc\n"),
+        CBM_LANG_BITBAKE);
+    ASSERT_EQ(disambiguate_inc_content(
+                  "/*\nextern \"C\" example in a comment\n*/\nSUMMARY = \"sample\"\n"),
+              CBM_LANG_BITBAKE);
+    PASS();
+}
+
 TEST(lang_ext_bitbake) {
     ASSERT_EQ(cbm_language_for_extension(".bb"), CBM_LANG_BITBAKE);
     ASSERT_EQ(cbm_language_for_extension(".bbclass"), CBM_LANG_BITBAKE);
@@ -1484,6 +1522,7 @@ SUITE(language) {
     RUN_TEST(lang_ext_devicetree);
     RUN_TEST(lang_ext_linkerscript);
     RUN_TEST(lang_ext_gn);
+    RUN_TEST(lang_inc_c_family_and_existing_dialects);
     RUN_TEST(lang_ext_bitbake);
     RUN_TEST(lang_ext_smali);
     RUN_TEST(lang_ext_tablegen);

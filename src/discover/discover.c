@@ -745,7 +745,7 @@ static CBMLanguage detect_file_language(const char *entry_name, const char *abs_
     if (dot && strcmp(dot, ".cls") == 0) {
         lang = cbm_disambiguate_cls(abs_path);
     }
-    /* Special: .inc is shared by BitBake and ObjectScript include files */
+    /* Special: .inc is shared by C/C++, BitBake and ObjectScript includes */
     if (dot && strcmp(dot, ".inc") == 0) {
         lang = cbm_disambiguate_inc(abs_path);
     }

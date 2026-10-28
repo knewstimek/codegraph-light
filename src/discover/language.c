@@ -1326,15 +1326,11 @@ CBMLanguage cbm_disambiguate_cls(const char *path) {
     return CBM_LANG_APEX;
 }
 
-/* Disambiguate .inc files: shared by BitBake include fragments and
- * InterSystems ObjectScript include (macro) files. ObjectScript .inc files are
- * predominantly macro definitions ("#define NAME ..." / "#def1arg NAME ...");
- * some also carry a "ROUTINE <Name>" header. The macro-preprocessor directives
- * are the strongest signal because that is the primary content of an .inc file,
- * whereas BitBake uses '#' only for "# comment" lines (always '#' + space).
- * We therefore match ObjectScript preprocessor directives ('#' immediately
- * followed by 'def'/';'), which BitBake never produces. Defaults to BitBake on
- * any doubt (preserves existing behaviour). */
+/* .inc is shared by C/C++, BitBake and ObjectScript. Explicit ObjectScript
+ * markers win; otherwise C-family directives/declarations select C++ (also
+ * accepts C fragments). A lone #define retains the ObjectScript fallback;
+ * unknown content and read failures retain BitBake. This selects a grammar,
+ * not the enclosing translation unit or function context. */
 CBMLanguage cbm_disambiguate_inc(const char *path) {
     if (!path) {
         return CBM_LANG_BITBAKE;
@@ -1350,8 +1346,74 @@ CBMLanguage cbm_disambiguate_inc(const char *path) {
     buf[n] = '\0';
     (void)fclose(f);
 
+    /* C-family fragments must not enter the recipe grammar. Use C++ as the
+     * superset for ambiguous C/C++ includes; #define alone stays ambiguous.
+     * Examine code, not comments or recipe string values. */
+    bool c_family = false;
+    bool objectscript_define = false;
+    bool block_comment = false;
     const char *line = buf;
     while (*line) {
+        const char *end = strchr(line, '\n');
+        if (!end) {
+            end = line + strlen(line);
+        }
+        const char *code = line;
+        while (code < end) {
+            if (block_comment) {
+                const char *close = strstr(code, "*/");
+                if (!close || close >= end) {
+                    code = end;
+                    break;
+                }
+                code = close + 2;
+                block_comment = false;
+            } else if (isspace((unsigned char)*code)) {
+                code++;
+            } else if (code + 1 < end && code[0] == '/' && code[1] == '*') {
+                block_comment = true;
+                code += 2;
+            } else {
+                break;
+            }
+        }
+        line = code;
+        const char *directive = line;
+        if (directive < end && *directive == '#') {
+            directive++;
+            while (directive < end && isspace((unsigned char)*directive)) {
+                directive++;
+            }
+            static const char *const c_directives[] = {"include", "ifdef", "ifndef", "if",
+                                                       "pragma",  "endif", "undef",  NULL};
+            for (int i = 0; c_directives[i]; i++) {
+                size_t len = strlen(c_directives[i]);
+                if ((size_t)(end - directive) >= len &&
+                    strncmp(directive, c_directives[i], len) == 0 &&
+                    (directive + len == end || !isalnum((unsigned char)directive[len]))) {
+                    c_family = true;
+                }
+            }
+        }
+        static const char *const c_keywords[] = {"extern",   "static", "typedef", "namespace",
+                                                 "template", "struct", "class",   NULL};
+        for (int i = 0; c_keywords[i]; i++) {
+            size_t len = strlen(c_keywords[i]);
+            if ((size_t)(end - line) > len && strncmp(line, c_keywords[i], len) == 0 &&
+                (isspace((unsigned char)line[len]) || line[len] == '(')) {
+                c_family = true;
+            }
+        }
+        /* A bare in-function fragment may contain only an if statement. */
+        if (end - line >= 2 && strncmp(line, "if", 2) == 0) {
+            const char *condition = line + 2;
+            while (condition < end && isspace((unsigned char)*condition)) {
+                condition++;
+            }
+            if (condition < end && *condition == '(') {
+                c_family = true;
+            }
+        }
         /* ObjectScript include header: a line beginning "ROUTINE <Uppercase>". */
         if (strncmp(line, "ROUTINE ", SLEN("ROUTINE ")) == 0 &&
             isupper((unsigned char)line[SLEN("ROUTINE ")])) {
@@ -1360,10 +1422,12 @@ CBMLanguage cbm_disambiguate_inc(const char *path) {
         /* ObjectScript macro directives — the primary content of .inc files.
          * "#define"/"#def1arg" (macro defs) and "#;" (line comment). BitBake's
          * only '#' use is "# comment" (hash + space), so these never collide. */
-        if (strncmp(line, "#define", SLEN("#define")) == 0 ||
-            strncmp(line, "#def1arg", SLEN("#def1arg")) == 0 ||
+        if (strncmp(line, "#def1arg", SLEN("#def1arg")) == 0 ||
             strncmp(line, "#;", SLEN("#;")) == 0) {
             return CBM_LANG_OBJECTSCRIPT_ROUTINE;
+        }
+        if (strncmp(line, "#define", SLEN("#define")) == 0) {
+            objectscript_define = true;
         }
         const char *nl = strchr(line, '\n');
         if (!nl) {
@@ -1371,7 +1435,8 @@ CBMLanguage cbm_disambiguate_inc(const char *path) {
         }
         line = nl + SKIP_ONE;
     }
-    return CBM_LANG_BITBAKE;
+    return c_family ? CBM_LANG_CPP
+                    : (objectscript_define ? CBM_LANG_OBJECTSCRIPT_ROUTINE : CBM_LANG_BITBAKE);
 }
 
 /* Case-insensitive prefix match (portable — no strncasecmp dependency). */
